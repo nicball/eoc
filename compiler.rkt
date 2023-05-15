@@ -58,10 +58,16 @@
   (lambda (e)
     (match e
       [(Var x)
-       (error "TODO: code goes here (uniquify-exp, symbol?)")]
+       (Var (dict-ref env x))]
       [(Int n) (Int n)]
       [(Let x e body)
-       (error "TODO: code goes here (uniquify-exp, let)")]
+       (letrec ([fresh
+                 (lambda (cand)
+                   (if (dict-has-key? env cand)
+                     (fresh (string->symbol (string-append (symbol->string cand) "'")))
+                     cand))]
+                [new-x (fresh x)])
+         (Let new-x ((uniquify-exp env) e) ((uniquify-exp (dict-set env x new-x)) body)))]
       [(Prim op es)
        (Prim op (for/list ([e es]) ((uniquify-exp env) e)))])))
 
@@ -72,11 +78,46 @@
 
 ;; remove-complex-opera* : R1 -> R1
 (define (remove-complex-opera* p)
-  (error "TODO: code goes here (remove-complex-opera*)"))
+  (define (unzip lst) (foldr (lambda (p acc) (cons (cons (car p) (car acc)) (cons (cdr p) (cdr acc)))) (cons '() '()) lst))
+  (define (rco-exp e)
+    (match e
+      [(Let x e body) (Let x (rco-exp e) (rco-exp body))]
+      [(Prim op args)
+       (letrec ([bindings-and-atoms (unzip (map rco-atom args))]
+                [bindings (apply append (car bindings-and-atoms))]
+                [list-to-lets
+                 (lambda (lst body)
+                   (if (pair? lst)
+                     (Let (caar lst) (cdar lst) (list-to-lets (cdr lst) body))
+                     body))])
+         (list-to-lets bindings (Prim op (cdr bindings-and-atoms))))]
+      [_ e]))
+  (define (rco-atom e)
+    (match e
+      [(Let x e body)
+       (match (rco-atom body)
+         [(cons bindings body) (cons (append (list (cons x (rco-exp e))) bindings) body)])]
+      [(Prim op args)
+       (letrec ([x (gensym 'tmp)]
+             [bindings-and-atoms (unzip (map rco-atom args))]
+             [bindings (apply append (car bindings-and-atoms))])
+         (cons (append bindings (list (cons x (Prim op (cdr bindings-and-atoms))))) (Var x)))]
+      [_ (cons '() e)]))
+  (match p
+    [(Program info e) (Program info (rco-exp e))]))
 
 ;; explicate-control : R1 -> C0
 (define (explicate-control p)
-  (error "TODO: code goes here (explicate-control)"))
+  (define (explicate-tail e)
+    (match e
+      [(Let x e body) (explicate-assign x e (explicate-tail body))]
+      [_ (Return e)]))
+  (define (explicate-assign x e tail)
+    (match e
+      [(Let x2 e2 body) (explicate-assign x2 e2 (explicate-assign x body tail))]
+      [_ (Seq (Assign (Var x) e) tail)]))
+  (match p
+    [(Program info e) (CProgram info (list (cons 'start (explicate-tail e))))]))
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
@@ -100,8 +141,8 @@
 (define compiler-passes
   `( ("uniquify" ,uniquify ,interp-Lvar ,type-check-Lvar)
      ;; Uncomment the following passes as you finish them.
-     ;; ("remove complex opera*" ,remove-complex-opera* ,interp-Lvar ,type-check-Lvar)
-     ;; ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
+     ("remove complex opera*" ,remove-complex-opera* ,interp-Lvar ,type-check-Lvar)
+     ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
      ;; ("instruction selection" ,select-instructions ,interp-x86-0)
      ;; ("assign homes" ,assign-homes ,interp-x86-0)
      ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
