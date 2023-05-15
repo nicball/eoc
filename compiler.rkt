@@ -8,6 +8,7 @@
 (require "type-check-Cvar.rkt")
 (require "utilities.rkt")
 (provide (all-defined-out))
+(require "interp.rkt")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Lint examples
@@ -121,19 +122,100 @@
 
 ;; select-instructions : C0 -> pseudo-x86
 (define (select-instructions p)
-  (error "TODO: code goes here (select-instructions)"))
+  (define (si-atom atom)
+    (match atom
+      [(Int i) (Imm i)]
+      [(Var x) (Var x)]))
+  (define (si-stmt s)
+    (match s
+      [(Assign x (Prim 'read '())) (list (Callq 'read_int 0) (Instr 'movq (list (Reg 'rax) x)))]
+      [(Assign x (Prim '- (list a)))
+       (if (and (Var? x) (Var? a) (eq? (Var-name x) (Var-name a)))
+         (list (Instr 'negq (list a)))
+         (list (Instr 'movq (list (si-atom a) x)) (Instr 'negq (list x))))]
+      [(Assign x (Prim '- (list a b)))
+       (if (and (Var? x) (Var? a) (eq? (Var-name x) (Var-name a)))
+         (list (Instr 'subq (list (si-atom b) a)))
+         (list (Instr 'movq (list (si-atom a) x)) (Instr 'subq (list (si-atom b) x))))]
+      [(Assign x (Prim '+ (list a b)))
+       (cond
+        [(and (Var? x) (Var? a) (eq? (Var-name x) (Var-name a))) (list (Instr 'addq (list (si-atom b) a)))]
+        [(and (Var? x) (Var? b) (eq? (Var-name x) (Var-name b))) (list (Instr 'addq (list (si-atom a) b)))]
+        [else (list (Instr 'movq (list (si-atom a) (Reg 'rax))) (Instr 'addq (list (si-atom b) (Reg 'rax))) (Instr 'movq (list (Reg 'rax) x)))])]
+      [(Assign x atom) (list (Instr 'movq (list (si-atom atom) x)))]))
+  (define (si-tail tail)
+    (match tail
+      [(Return e) (append (si-stmt (Assign (Reg 'rax) e)) (list (Jmp 'conclusion)))]
+      [(Seq stmt tail) (append (si-stmt stmt) (si-tail tail))]))
+  (match p
+    [(CProgram info blocks)
+     (X86Program info (for/list ([b blocks]) (cons (car b) (Block '() (si-tail (cdr b))))))]))
 
 ;; assign-homes : pseudo-x86 -> pseudo-x86
 (define (assign-homes p)
-  (error "TODO: code goes here (assign-homes)"))
+  (match p
+    [(X86Program info blocks)
+     (define locals-types
+       (if (dict-has-key? info 'locals-types)
+         (dict-ref info 'locals-types)
+         '()))
+     (define stack-size
+       (let* ([ss (* (length locals-types) 8)]
+              [rem (remainder ss 16)])
+         (if (> rem 0)
+           (+ ss (- 16 rem))
+           ss)))
+     (define (get-locals-offset symbol)
+       (define (go lst n)
+         (cond
+          [(null? lst) (error "get-locals-offset: out of bound")]
+          [(eq? (caar lst) symbol) n]
+          [else (go (cdr lst) (+ 1 n))]))
+       (* -8 (go locals-types 1)))
+     (define (ah-arg arg)
+       (match arg
+         [(Var x) (Deref 'rbp (get-locals-offset x))]
+         [_ arg]))
+     (define (ah-instr instr)
+       (match instr
+         [(Instr op args) (Instr op (map ah-arg args))]
+         [_ instr]))
+     (X86Program (dict-set info 'stack-size stack-size)
+       (for/list ([label-and-block blocks])
+         (match label-and-block
+           [(cons label (Block info instrs))
+            (cons label (Block info (map ah-instr instrs)))])))]))
 
 ;; patch-instructions : psuedo-x86 -> x86
 (define (patch-instructions p)
-  (error "TODO: code goes here (patch-instructions)"))
+  (define (patch instr)
+    (match instr
+      [(Instr op (list (Deref reg1 off1) (Deref reg2 off2)))
+       (list
+         (Instr 'movq (list (Deref reg1 off1) (Reg 'rax)))
+         (Instr op (list (Reg 'rax) (Deref reg2 off2))))]
+      [_ (list instr)]))
+  (match p
+    [(X86Program info blocks)
+     (X86Program info (for/list ([label-and-block blocks])
+       (match label-and-block
+         [(cons label (Block info instrs))
+          (cons label (Block info (apply append (map patch instrs))))])))]))
 
 ;; prelude-and-conclusion : x86 -> x86
 (define (prelude-and-conclusion p)
-  (error "TODO: code goes here (prelude-and-conclusion)"))
+  (match p
+    [(X86Program info blocks)
+     (X86Program info (append blocks (list
+       (cons 'main (Block '() (list
+         (Instr 'pushq (list (Reg 'rbp)))
+         (Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
+         (Instr 'subq (list (Imm (dict-ref info 'stack-size)) (Reg 'rsp)))
+         (Jmp 'start))))
+       (cons 'conclusion (Block '() (list
+         (Instr 'addq (list (Imm (dict-ref info 'stack-size)) (Reg 'rsp)))
+         (Instr 'popq (list (Reg 'rbp)))
+         (Retq)))))))]))
 
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
@@ -143,8 +225,8 @@
      ;; Uncomment the following passes as you finish them.
      ("remove complex opera*" ,remove-complex-opera* ,interp-Lvar ,type-check-Lvar)
      ("explicate control" ,explicate-control ,interp-Cvar ,type-check-Cvar)
-     ;; ("instruction selection" ,select-instructions ,interp-x86-0)
-     ;; ("assign homes" ,assign-homes ,interp-x86-0)
-     ;; ("patch instructions" ,patch-instructions ,interp-x86-0)
-     ;; ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
+     ("instruction selection" ,select-instructions ,interp-x86-0)
+     ("assign homes" ,assign-homes ,interp-x86-0)
+     ("patch instructions" ,patch-instructions ,interp-x86-0)
+     ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-0)
      ))
