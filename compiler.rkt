@@ -141,7 +141,7 @@
        (cond
         [(and (Var? x) (Var? a) (eq? (Var-name x) (Var-name a))) (list (Instr 'addq (list (si-atom b) a)))]
         [(and (Var? x) (Var? b) (eq? (Var-name x) (Var-name b))) (list (Instr 'addq (list (si-atom a) b)))]
-        [else (list (Instr 'movq (list (si-atom a) (Reg 'rax))) (Instr 'addq (list (si-atom b) (Reg 'rax))) (Instr 'movq (list (Reg 'rax) x)))])]
+        [else (list (Instr 'movq (list (si-atom a) x)) (Instr 'addq (list (si-atom b) x)))])]
       [(Assign x atom) (list (Instr 'movq (list (si-atom atom) x)))]))
   (define (si-tail tail)
     (match tail

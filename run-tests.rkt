@@ -5,7 +5,8 @@
 (require "interp-Lvar.rkt")
 (require "interp-Cvar.rkt")
 (require "interp.rkt")
-(require "compiler.rkt")
+;(require "compiler.rkt")
+(require "compiler-register-allocation.rkt")
 (debug-level 1)
 (AST-output-syntax 'concrete-syntax)
 
