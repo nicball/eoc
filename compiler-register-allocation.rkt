@@ -301,16 +301,15 @@
        (cons 'main (Block '() (concat (list
          (list
            (Instr 'pushq (list (Reg 'rbp)))
-           (Instr 'movq (list (Reg 'rsp) (Reg 'rbp))))
+           (Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
+           (Instr 'subq (list (Imm stack-size) (Reg 'rsp))))
          save-registers
          (list
-           (Instr 'subq (list (Imm stack-size) (Reg 'rsp)))
            (Jmp 'start))))))
        (cons 'conclusion (Block '() (concat (list
-         (list
-           (Instr 'addq (list (Imm stack-size) (Reg 'rsp))))
          restore-registers
          (list
+           (Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
            (Instr 'popq (list (Reg 'rbp)))
            (Retq)))))))))]))
   
