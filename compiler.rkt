@@ -95,9 +95,9 @@
       [_ e]))
   (define (rco-atom e)
     (match e
-      [(Let x e body)
-       (match (rco-atom body)
-         [(cons bindings body) (cons (append (list (cons x (rco-exp e))) bindings) body)])]
+      [(Let _ _ _)
+       (let ([le (gensym 'tmp-let)])
+         (cons (list (cons le (rco-exp e))) (Var le)))]
       [(Prim op args)
        (letrec ([x (gensym 'tmp)]
              [bindings-and-atoms (unzip (map rco-atom args))]
