@@ -64,11 +64,9 @@
       [(Let _ _ _)
        (let ([le (gensym 'tmp-let)])
          (cons (list (cons le (rco-exp e))) (Var le)))]
-      [(Prim op args)
-       (letrec ([x (gensym 'tmp)]
-             [bindings-and-atoms (unzip (map rco-atom args))]
-             [bindings (concat (car bindings-and-atoms))])
-         (cons (append bindings (list (cons x (Prim op (cdr bindings-and-atoms))))) (Var x)))]
+      [(Prim op _)
+       (let ([pe (gensym (symbol-append 'tmp. op))])
+         (cons (list (cons pe (rco-exp e))) (Var pe)))]
       [_ (cons '() e)]))
   (match p
     [(Program info e) (Program info (rco-exp e))]))

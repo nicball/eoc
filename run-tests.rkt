@@ -4,10 +4,11 @@
 (require "utilities.rkt")
 (require "interp-Lvar.rkt")
 (require "interp-Lif.rkt")
+(require "interp-Lwhile.rkt")
 (require "interp-Cvar.rkt")
 (require "interp.rkt")
-;(require "compiler.rkt")
-(require "compiler-if.rkt")
+;(require "compiler-register-allocation.rkt")
+(require "compiler-while.rkt")
 (debug-level 1)
 (AST-output-syntax 'concrete-syntax)
 
@@ -26,9 +27,11 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
+;(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
+;(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
+(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "cond" #f compiler-passes "cond_test" (tests-for "cond"))
+(compiler-tests "while" #f compiler-passes "while_test" (tests-for "while"))
 
