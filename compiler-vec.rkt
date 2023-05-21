@@ -87,7 +87,7 @@
      [((Begin effs e))
       (Begin (map expose-allocation-exp effs) (expose-allocation-exp e))]
      [((WhileLoop c e))
-      (Begin (expose-allocation-exp c) (expose-allocation-exp e))]
+      (WhileLoop (expose-allocation-exp c) (expose-allocation-exp e))]
      [((HasType (Prim 'vector es) type))
       (define (eval-elems es xs body)
         (match es
@@ -621,6 +621,3 @@
      ("patch instructions" ,patch-instructions ,interp-x86-2)
      ("prelude-and-conclusion" ,prelude-and-conclusion ,interp-x86-2)
      ))
-
-
-
