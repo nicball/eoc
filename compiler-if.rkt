@@ -120,8 +120,8 @@
        (let ([goto-t (emit-block 'then t)]
              [goto-e (emit-block 'else e)])
          (explicate-if c2 (explicate-if t2 goto-t goto-e) (explicate-if e2 goto-t goto-e)))]
-      [(Let x e body)
-       (explicate-let x e (explicate-if body t e))]
+      [(Let x ee body)
+       (explicate-let x ee (explicate-if body t e))]
       [_ (error "explicate-if: unhandled case")]))
   (define (explicate-let x e cont)
     (match e

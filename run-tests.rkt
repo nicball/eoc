@@ -5,10 +5,10 @@
 (require "interp-Lvar.rkt")
 (require "interp-Lif.rkt")
 (require "interp-Lwhile.rkt")
-(require "interp-Cvar.rkt")
+(require "interp-Lvec.rkt")
+;(require "interp-Cvar.rkt")
 (require "interp.rkt")
-;(require "compiler-register-allocation.rkt")
-(require "compiler-while.rkt")
+(require "compiler-vec.rkt")
 (debug-level 1)
 (AST-output-syntax 'concrete-syntax)
 
@@ -29,9 +29,10 @@
 
 ;(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
 ;(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
-(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
+;(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
+(interp-tests "vec" #f compiler-passes interp-Lvec "vectors_test" (tests-for "vectors"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "while" #f compiler-passes "while_test" (tests-for "while"))
+(compiler-tests "vec" #f compiler-passes "vectors_test" (tests-for "vectors"))
 
