@@ -285,6 +285,13 @@
         (Instr 'movq (list (si-atom v) (Reg 'r11)))
         (Instr 'movq (list (si-atom e) (Deref 'r11 (vector-offset n))))
         (Instr 'movq (list (Imm 0) x)))]
+     [((Assign x (Prim 'vector-length (list v))))
+      (list
+        (Instr 'movq (list (si-atom v) (Reg 'r11)))
+        (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
+        (Instr 'sarq (list (Imm 1) (Reg 'rax)))
+        (Instr 'andq (list (Imm 63) (Reg 'rax)))
+        (Instr 'movq (list (Reg 'rax) x)))]
      [((Assign x (Allocate n (list 'Vector elem-types ...))))
       (list
         (Instr 'movq (list (Global 'free_ptr) (Reg 'r11)))
@@ -340,7 +347,7 @@
 (define caller-saved-registers (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11)))
 (define (locations-written instr)
   (set-filter location? (match instr
-    [(Instr (or 'addq 'subq 'xorq 'movq 'movzbq) (list _ b)) (set b)]
+    [(Instr (or 'addq 'subq 'xorq 'movq 'movzbq 'andq 'sarq) (list _ b)) (set b)]
     [(Instr (or 'negq 'pushq 'popq) (list a)) (set a)]
     [(Instr 'set (list _ a)) (set a)]
     [(Instr 'cmpq _) (set)]
@@ -361,7 +368,7 @@
      (list->set (take argument-passing-registers (max n 6))))
    (define (locations-read instr)
      (set-filter location? (match instr
-       [(Instr (or 'addq 'subq 'xorq 'cmpq 'negq) args) (list->set args)]
+       [(Instr (or 'addq 'subq 'xorq 'cmpq 'negq 'andq 'sarq) args) (list->set args)]
        [(Instr 'movq (list a _)) (set a)]
        [(Instr 'movzbq (list a _)) (set (enlarge-reg a))]
        [(Instr (or 'pushq 'popq) _) (set)]
