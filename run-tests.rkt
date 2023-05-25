@@ -9,7 +9,6 @@
 ;(require "interp-Cvar.rkt")
 (require "interp.rkt")
 (require "compiler-vec.rkt")
-(debug-level 1)
 (AST-output-syntax 'concrete-syntax)
 
 ;; all the files in the tests/ directory with extension ".rkt".
@@ -27,10 +26,12 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-;(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
-;(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
-;(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
+(debug-level 1)
 (interp-tests "vec" #f compiler-passes interp-Lvec "vectors_test" (tests-for "vectors"))
+(debug-level 0)
+(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
+(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
+(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.

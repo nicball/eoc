@@ -33,19 +33,26 @@
     [(list 'Vector _ ...) #t]
     [_ #f]))
 
+(define (log fmt e) (printf fmt e) e)
+
+(define ((induct-L f) e)
+  (match e
+    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _)) (f e)]
+    [(Prim op args) (f (Prim op (map (induct-L f) args)))]
+    [(Let x e body) (f (Let x ((induct-L f) e) ((induct-L f) body)))]
+    [(If c t e) (f (If ((induct-L f) c) ((induct-L f) t) ((induct-L f) e)))]
+    [(SetBang x e) (f (SetBang x ((induct-L f) e)))]
+    [(Begin effs e) (f (Begin (map (induct-L f) effs) ((induct-L f) e)))]
+    [(WhileLoop c e) (f (WhileLoop ((induct-L f) c) ((induct-L f) e)))]
+    [(HasType e t) (f (HasType ((induct-L f) e) t))]))
+
 (define/match (shrink p)
   [((Program info exp))
    (define/match (shrink-exp exp)
-     [((or (Void) (Int _) (Var _) (Bool _))) exp]
-     [((WhileLoop c e)) (WhileLoop (shrink-exp c) (shrink-exp e))]
-     [((SetBang x e)) (SetBang x (shrink-exp e))]
-     [((Begin effs e)) (Begin (map shrink-exp effs) (shrink-exp e))]
-     [((If c t e)) (If (shrink-exp c) (shrink-exp t) (shrink-exp e))]
-     [((Let x e body)) (Let x (shrink-exp e) (shrink-exp body))]
-     [((Prim 'and (list a b))) (If (shrink-exp a) (shrink-exp b) (Bool #f))]
-     [((Prim 'or (list a b))) (If (shrink-exp a) (Bool #t) (shrink-exp b))]
-     [((Prim op args)) (Prim op (map shrink-exp args))])
-   (Program info (shrink-exp exp))])
+     [((Prim 'and (list a b))) (If a b (Bool #f))]
+     [((Prim 'or (list a b))) (If a (Bool #t) b)]
+     [(_) exp])
+   (Program info ((induct-L shrink-exp) exp))])
 
 (define (uniquify-exp env)
   (match-lambda
@@ -72,26 +79,12 @@
   [((Program info e)) (Program info ((uniquify-exp (hash)) e))])
 
 (define/match (expose-allocation p)
-  [((Program info e))
-   (define/match (expose-allocation-exp e)
-     [((or (Int _) (Var _) (Bool _) (Void)))
-      e]
-     [((Prim op args))
-      (Prim op (map expose-allocation-exp args))]
-     [((Let x e body))
-      (Let x (expose-allocation-exp e) (expose-allocation-exp body))]
-     [((If c t e))
-      (If (expose-allocation-exp c) (expose-allocation-exp t) (expose-allocation-exp e))]
-     [((SetBang x e))
-      (SetBang x (expose-allocation-exp e))]
-     [((Begin effs e))
-      (Begin (map expose-allocation-exp effs) (expose-allocation-exp e))]
-     [((WhileLoop c e))
-      (WhileLoop (expose-allocation-exp c) (expose-allocation-exp e))]
+  [((Program info exp))
+   (define/match (expose-allocation-exp exp)
      [((HasType (Prim 'vector es) type))
       (define (eval-elems es xs body)
         (match es
-          [(cons e es) (Let (car xs) (expose-allocation-exp e) (eval-elems es (cdr xs) body))]
+          [(cons e es) (Let (car xs) e (eval-elems es (cdr xs) body))]
           ['() body]))
       (define n (length es))
       (define allocation-size (* 8 (+ 1 n)))
@@ -108,8 +101,9 @@
         (Begin (list check-enough-space)
           (Let vector-var (Allocate n type)
             (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
-              (Var vector-var)))))])
-   (Program info (expose-allocation-exp e))])
+              (Var vector-var)))))]
+     [(_) exp])
+   (Program info ((induct-L expose-allocation-exp) exp))])
 
 (define/match (uncover-get! p)
   [((Program info e))
@@ -118,44 +112,35 @@
      [((SetBang x e)) (set-union (set x) (collect-set! e))]
      [((Begin effs e)) (apply set-union (collect-set! e) (map collect-set! effs))]
      [((WhileLoop c e)) (set-union (uncover-get! c) (uncover-get! e))]
-     [((or (Void) (Bool _) (Var _) (Int _))) (set)]
+     [((or (Void) (Bool _) (Var _) (Int _) (GetBang _))) (set)]
      [((If c t e)) (set-union (collect-set! c) (collect-set! t) (collect-set! e))]
      [((Let x e body)) (set-union (collect-set! e) (collect-set! body))]
      [((Prim op args)) (apply set-union (set) (map collect-set! args))])
-   (define/match (uncover-get!-exp e)
-     [((or (Void) (Bool _) (Var _) (Int _) (Collect _) (Allocate _ _) (GlobalValue _))) e]
-     [((SetBang x e)) (SetBang x (uncover-get!-exp e))]
-     [((Begin effs e)) (Begin (map uncover-get!-exp effs) (uncover-get!-exp e))]
-     [((WhileLoop c e)) (WhileLoop (uncover-get!-exp c) (uncover-get!-exp e))]
-     [((If c t e)) (If (uncover-get!-exp c) (uncover-get!-exp t) (uncover-get!-exp e))]
-     [((Let x e body)) (Let x (uncover-get!-exp e) (uncover-get!-exp body))]
-     [((Prim op args))
-      (let ([muts (apply set-union (set) (map collect-set! args))])
-        (Prim op
-          (for/list ([arg args])
-            (match (uncover-get!-exp arg)
-              [(Var x) #:when (set-member? muts x)
-               (GetBang x)]
-              [e e]))))])
+   (define uncover-get!-exp
+     (induct-L (match-lambda
+       [(Prim op args)
+        (let ([muts (apply set-union (set) (map collect-set! args))])
+          (Prim op
+            (for/list ([arg args])
+              (match arg
+                [(Var x) #:when (set-member? muts x)
+                 (GetBang x)]
+                [_ arg]))))]
+       [exp exp])))
    (Program info (uncover-get!-exp e))])
 
 ;; remove-complex-opera* : R1 -> R1
 (define/match (remove-complex-opera* p)
   [((Program info e))
    (define (unzip lst) (foldr (lambda (p acc) (cons (cons (car p) (car acc)) (cons (cdr p) (cdr acc)))) (cons '() '()) lst))
-   (define/match (rco-exp e)
-     [((GetBang x)) (error 'rco-exp "impossible")]
-     [((SetBang x e)) (SetBang x (rco-exp e))]
-     [((Begin effs e)) (Begin (map rco-exp effs) (rco-exp e))]
-     [((WhileLoop c e)) (WhileLoop (rco-exp c) (rco-exp e))]
-     [((If c t e)) (If (rco-exp c) (rco-exp t) (rco-exp e))]
-     [((Let x e body)) (Let x (rco-exp e) (rco-exp body))]
-     [((Prim op args))
-      (let* ([bindings-and-atoms (unzip (map rco-atom args))]
-             [bindings (concat (car bindings-and-atoms))])
-        (for/foldr ([exp (Prim op (cdr bindings-and-atoms))]) ([binding bindings])
-          (Let (car binding) (cdr binding) exp)))]
-     [(_) e])
+   (define rco-exp
+     (induct-L (match-lambda
+       [(Prim op args)
+        (let* ([bindings-and-atoms (unzip (map rco-atom args))]
+               [bindings (concat (car bindings-and-atoms))])
+          (for/foldr ([exp (Prim op (cdr bindings-and-atoms))]) ([binding bindings])
+            (Let (car binding) (cdr binding) exp)))]
+       [e e])))
    (define/match (exp->symbol e)
      [((Begin _ _)) (gensym 'op.begin.)]
      [((If _ _ _)) (gensym 'op.if.)]
@@ -515,9 +500,9 @@
          (make-immutable-hash (for/list ([p reg-variables] #:when (Var? (car p))) (cons (car p) (dict-ref color->reg (cdr p)))))
          (make-immutable-hash (for/list ([p stack-variables] [i (in-naturals)]) (cons (car p) (Deref 'rbp (* -8 (+ 1 i))))))
          (make-immutable-hash (for/list ([p root-variables] [i (in-naturals)]) (cons (car p) (Deref 'r15 (* -8 (+ 1 i)))))))))
-   (displayln "==============ATTENTION===============")
-   (printf "~a ~a ~a\n" variable->reg variable->stack variable->root)
-   (displayln (graphviz interference))
+   ; (displayln "==============ATTENTION===============")
+   ; (printf "~a ~a ~a\n" variable->reg variable->stack variable->root)
+   ; (displayln (graphviz interference))
    (define (transform-instr instr)
      (define/match (transform-arg arg)
        [((Var x))
