@@ -726,13 +726,13 @@
         ,@restore-registers
         ,(Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
         ,(Instr 'popq (list (Reg 'rbp)))
-        ,(TailJmp f arity))]
+        ,(IndirectJmp f))]
      [(_) (list instr)])
    (set! blocks
      (for/hash ([(label block) (in-dict blocks)])
        (match block
          [(Block info instrs) (values label (Block info (concat (map transform-instr instrs))))])))
-   (dict-set* blocks
+   (Def name '() 'Integer info (dict-set* blocks
      name (Block '() `(
        ,(Instr 'pushq (list (Reg 'rbp)))
        ,(Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
@@ -746,11 +746,11 @@
        ,@restore-registers
        ,(Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
        ,(Instr 'popq (list (Reg 'rbp)))
-       ,(Retq))))])
+       ,(Retq)))))])
 
 (define/match (prelude-and-conclusion p)
   [((ProgramDefs info defs))
-   (X86Program info (apply hash-union (map prelude-and-conclusion-Def defs)))])
+   (ProgramDefs info (map prelude-and-conclusion-Def defs))])
   
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
@@ -770,5 +770,5 @@
      ("build interference graph" ,build-interference ,interp-x86-3)
      ("allocate registers" ,allocate-registers ,interp-x86-3)
      ("patch instructions" ,patch-instructions ,interp-x86-3)
-     ("prelude and conclusion" ,prelude-and-conclusion ,interp-x86-2)
+     ("prelude and conclusion" ,prelude-and-conclusion ,interp-x86-3)
      ))
