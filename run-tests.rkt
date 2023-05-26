@@ -1,4 +1,4 @@
-#! /usr/bin/env racket
+#! /usr/bin/env -S nix shell nixpkgs#racket --command racket
 #lang racket
 
 (require "utilities.rkt")
@@ -6,9 +6,11 @@
 (require "interp-Lif.rkt")
 (require "interp-Lwhile.rkt")
 (require "interp-Lvec.rkt")
+(require "interp-Lfun.rkt")
+(require "type-check-Lfun.rkt")
 ;(require "interp-Cvar.rkt")
 (require "interp.rkt")
-(require "compiler-vec.rkt")
+(require "compiler.rkt")
 (AST-output-syntax 'concrete-syntax)
 
 ;; all the files in the tests/ directory with extension ".rkt".
@@ -27,13 +29,14 @@
         all-tests)))
 
 (debug-level 1)
-(interp-tests "vec" #f compiler-passes interp-Lvec "vectors_test" (tests-for "vectors"))
+(interp-tests "fun" type-check-Lfun compiler-passes interp-Lfun "functions_test" (tests-for "functions"))
 (debug-level 0)
-(interp-tests "var" #f compiler-passes interp-Lvar "var_test" (tests-for "var"))
-(interp-tests "cond" #f compiler-passes interp-Lif "cond_test" (tests-for "cond"))
-(interp-tests "while" #f compiler-passes interp-Lwhile "while_test" (tests-for "while"))
+(interp-tests "var" type-check-Lfun compiler-passes interp-Lfun "var_test" (tests-for "var"))
+(interp-tests "cond" type-check-Lfun compiler-passes interp-Lfun "cond_test" (tests-for "cond"))
+(interp-tests "while" type-check-Lfun compiler-passes interp-Lfun "while_test" (tests-for "while"))
+(interp-tests "vec" type-check-Lfun compiler-passes interp-Lfun "vectors_test" (tests-for "vectors"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "vec" #f compiler-passes "vectors_test" (tests-for "vectors"))
+(compiler-tests "fun" #f compiler-passes "functions_test" (tests-for "functions"))
 

@@ -1,6 +1,6 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Lvecof.rkt")
+(require "type-check-Lvec.rkt")
 (provide type-check-Lfun type-check-Lfun-class)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -13,7 +13,7 @@
 ;; TODO: Don't allow eq? on function types. -Jeremy
 
 (define type-check-Lfun-class
-  (class type-check-Lvecof-class
+  (class type-check-Lvec-class
     (super-new)
     (inherit check-type-equal?)
 
