@@ -185,22 +185,26 @@
          [(Def name params rty info body)
           (Def name params rty info (uncover-get!-exp body))])))])
 
-;; remove-complex-opera* : R1 -> R1
-(define/match (remove-complex-opera* p)
+;; remove-complex-operands : R1 -> R1
+(define/match (remove-complex-operands p)
   [((ProgramDefs info defs))
    (define (unzip lst) (foldr (lambda (p acc) (cons (cons (car p) (car acc)) (cons (cdr p) (cdr acc)))) (cons '() '()) lst))
    (define rco-exp
      (induct-L (match-lambda
        [(Prim op args)
-        (let* ([bindings-and-atoms (unzip (map rco-atom args))]
-               [bindings (concat (car bindings-and-atoms))])
-          (for/foldr ([exp (Prim op (cdr bindings-and-atoms))]) ([binding bindings])
-            (Let (car binding) (cdr binding) exp)))]
-       [(Apply e es)
-        (let* ([bindings-and-atoms (unzip (map rco-atom (cons e es)))]
-               [bindings (concat (car bindings-and-atoms))])
-          (for/foldr ([exp (Apply (cadr bindings-and-atoms) (cddr bindings-and-atoms))]) ([binding bindings])
-            (Let (car binding) (cdr binding) exp)))]
+        (define-values (bindings atoms)
+          (for/fold ([bindings '()] [atoms '()]) ([exp args])
+            (let-values ([(bs a) (rco-atom exp)])
+              (values (append bindings bs) (append atoms (list a))))))
+        (for/foldr ([exp (Prim op atoms)]) ([binding bindings])
+          (Let (car binding) (cdr binding) exp))]
+       [(Apply f args)
+        (define-values (bindings atoms)
+          (for/fold ([bindings '()] [atoms '()]) ([exp (cons f args)])
+            (let-values ([(bs a) (rco-atom exp)])
+              (values (append bindings bs) (append atoms (list a))))))
+        (for/foldr ([exp (Apply (car atoms) (cdr atoms))]) ([binding bindings])
+          (Let (car binding) (cdr binding) exp))]
        [e e])))
    (define/match (exp->symbol e)
      [((Begin _ _)) (gensym 'op.begin.)]
@@ -214,11 +218,11 @@
    (define/match (rco-atom e)
      [((GetBang x))
       (let ([xx (gensym (append-point x))])
-        (cons (list (cons xx (Var x))) (Var xx)))]
+        (values (list (cons xx (Var x))) (Var xx)))]
      [((or (Begin _ _) (If _ _ _) (Let _ _ _) (Prim _ _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _)))
       (let ([x (exp->symbol e)])
-        (cons (list (cons x (rco-exp e))) (Var x)))]
-     [(_) (cons '() e)])
+        (values (list (cons x (rco-exp e))) (Var x)))]
+     [(_) (values '() e)])
    (ProgramDefs info
      (for/list ([def defs])
        (match def
@@ -776,7 +780,7 @@
      ("elaborate" ,type-check-Lfun ,interp-Lfun-prime ,type-check-Lfun)
      ("expose allocation" ,expose-allocation ,interp-Lfun-prime ,type-check-Lfun)
      ("uncover get!" ,uncover-get! ,interp-Lfun-prime ,type-check-Lfun)
-     ("remove complex opera*" ,remove-complex-opera* ,interp-Lfun-prime ,type-check-Lfun)
+     ("remove complex operands" ,remove-complex-operands ,interp-Lfun-prime ,type-check-Lfun)
      ("explicate control" ,explicate-control ,interp-Cfun ,type-check-Cfun)
      ("instruction selection" ,select-instructions ,interp-x86-3)
      ("liveness analysis" ,uncover-live ,interp-x86-3)
