@@ -240,6 +240,9 @@
    (define (explicate-effects effs cont)
      (match effs
        ['() cont]
+       [(cons (Apply f args) effs)
+        (define x (gensym 'not.used.))
+        (explicate-assign x (Apply f args) (explicate-effects effs cont))]
        [(cons (WhileLoop c e) effs) 
         (let ([loop-head-label (gensym 'loop.head.)]
               [loop-body-label (gensym 'loop.body.)])
@@ -255,7 +258,7 @@
         (Seq (Prim 'vector-set! args) (explicate-effects effs cont))]
        [(cons (Collect n) effs)
         (Seq (Collect n) (explicate-effects effs cont))]
-       [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _)) effs)
+       [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _)) effs)
         (explicate-effects effs cont)]
        [(cons (If c t e) effs)
         (let ([cont (emit-block 'effs. (explicate-effects effs cont))])
@@ -264,9 +267,9 @@
         (explicate-assign x e (explicate-effects (cons body effs) cont))]))
    (define (explicate-if c t e)
      (match c
-       [(Apply _ _)
+       [(Apply f args)
         (define cond-var (gensym 'if.cond.))
-        (explicate-assign cond-var c (explicate-if (Var cond-var) t e))]
+        (explicate-assign cond-var (Call f args) (explicate-if (Var cond-var) t e))]
        [(Begin effs c) (explicate-effects effs (explicate-if c t e))]
        [(Bool b)
         (if b t e)]
@@ -289,6 +292,7 @@
        [_ (error 'explicate-if "~a is not a predicate" c)]))
    (define (explicate-assign x e cont)
      (match e
+       [(Apply f args) (Seq (Assign (Var x) (Call f args)) cont)]
        [(or (Collect _) (SetBang _ _) (WhileLoop _ _)) (error 'explicate-assign "~a cannot be assigned to ~a" e x)]
        [(GetBang _) (error 'explicate-assign "impossible")]
        [(Begin effs e) (explicate-effects effs (explicate-assign x e cont))]
@@ -712,19 +716,26 @@
            (Instr 'movq (list (Imm 0) (Deref 'r15 0)))
            (Instr 'addq (list (Imm 8) (Reg 'r15)))))))
    (define finalize-root-stack
-     (Instr 'subq (list (Imm (* 8 (dict-ref info 'num-root-spills))) (Reg 'r15))))
+     (let ([root-size (* 8 (dict-ref info 'num-root-spills))])
+       (if (> root-size 0)
+         (list (Instr 'subq (list (Imm root-size) (Reg 'r15))))
+         '())))
    (define initialize-gc
      (list
        (Instr 'movq (list (Imm 65536) (Reg 'rdi)))
        (Instr 'movq (list (Imm 65536) (Reg 'rsi)))
        (Callq 'initialize 2)
        (Instr 'movq (list (Global 'rootstack_begin) (Reg 'r15)))))
+   (define allocate-stack-variables
+     (if (> stack-size 0) (list (Instr 'subq (list (Imm stack-size) (Reg 'rsp)))) '()))
+   (define deallocate-stack-variables
+     (if (> stack-size 0) (list (Instr 'addq (list (Imm stack-size) (Reg 'rsp)))) '()))
    (define/match (transform-instr instr)
      [((TailJmp f arity))
       `(
-        ,finalize-root-stack
+        ,@finalize-root-stack
         ,@restore-registers
-        ,(Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
+        ,@deallocate-stack-variables
         ,(Instr 'popq (list (Reg 'rbp)))
         ,(IndirectJmp f))]
      [(_) (list instr)])
@@ -732,25 +743,27 @@
      (for/hash ([(label block) (in-dict blocks)])
        (match block
          [(Block info instrs) (values label (Block info (concat (map transform-instr instrs))))])))
-   (Def name '() 'Integer info (dict-set* blocks
+   ;(Def name '() 'Integer info (dict-set* blocks
+   (dict-set* blocks
      name (Block '() `(
        ,(Instr 'pushq (list (Reg 'rbp)))
        ,(Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
-       ,(Instr 'subq (list (Imm stack-size) (Reg 'rsp)))
+       ,@allocate-stack-variables
        ,@save-registers
        ,@(if (eq? name 'main) initialize-gc '())
        ,@initialize-root-stack
        ,(Jmp (symbol-append name 'start))))
      (symbol-append name 'conclusion) (Block '() `(
-       ,finalize-root-stack
+       ,@finalize-root-stack
        ,@restore-registers
-       ,(Instr 'addq (list (Imm stack-size) (Reg 'rsp)))
+       ,@deallocate-stack-variables
        ,(Instr 'popq (list (Reg 'rbp)))
-       ,(Retq)))))])
+       ,(Retq))))])
 
 (define/match (prelude-and-conclusion p)
   [((ProgramDefs info defs))
-   (ProgramDefs info (map prelude-and-conclusion-Def defs))])
+   ;(ProgramDefs info (map prelude-and-conclusion-Def defs))])
+   (X86Program info (apply hash-union (map prelude-and-conclusion-Def defs)))])
   
 ;; Define the compiler passes to be used by interp-tests and the grader
 ;; Note that your compiler file (the file that defines the passes)
@@ -770,5 +783,5 @@
      ("build interference graph" ,build-interference ,interp-x86-3)
      ("allocate registers" ,allocate-registers ,interp-x86-3)
      ("patch instructions" ,patch-instructions ,interp-x86-3)
-     ("prelude and conclusion" ,prelude-and-conclusion ,interp-x86-3)
+     ("prelude and conclusion" ,prelude-and-conclusion #f)
      ))

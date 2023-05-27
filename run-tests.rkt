@@ -38,5 +38,6 @@
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.
-(compiler-tests "fun" #f compiler-passes "functions_test" (tests-for "functions"))
+(debug-level 0)
+(compiler-tests "fun" type-check-Lfun compiler-passes "functions_test" (tests-for "functions"))
 

@@ -37,6 +37,8 @@
                                 ((type-check-exp env) e)))
       (match ty
         [`(,ty^* ... -> ,rt)
+         (when (not (= (length ty*) (length ty^*)))
+           (error 'type-check "wrong number of arguments in ~a" (Apply e es)))
          (for ([arg-ty ty*] [param-ty ty^*])
            (check-type-equal? arg-ty param-ty (Apply e es)))
          (values e^ e* rt)]

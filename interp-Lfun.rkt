@@ -1,7 +1,7 @@
 #lang racket
 (require racket/fixnum)
 (require "utilities.rkt")
-(require "interp-Lvecof.rkt")
+(require "interp-Lvec.rkt")
 (provide interp-Lfun interp-Lfun-class)
 
 ;; Note to maintainers of this code:
@@ -9,7 +9,7 @@
 ;;   kept in sync with this code.
 
 (define interp-Lfun-class
-  (class interp-Lvecof-class
+  (class interp-Lvec-class
     (super-new)
 
     (define/public (apply-fun fun-val arg-vals e)
