@@ -53,18 +53,20 @@
 
 (define (uniquify-exp env)
   (match-lambda
-    [(SetBang x e) (SetBang x ((uniquify-exp env) e))]
+    [(HasType e t) (HasType ((uniquify-exp env) e) t)]
+    [(Apply f args) (Apply ((uniquify-exp env) f) (map (uniquify-exp env) args))]
+    [(and exp (or (Void) (Int _) (Bool _))) exp]
+    [(SetBang x e) (SetBang (dict-ref env x) ((uniquify-exp env) e))]
     [(Begin effs e) (Begin (map (uniquify-exp env) effs) ((uniquify-exp env) e))]
     [(WhileLoop c e) (WhileLoop ((uniquify-exp env) c) ((uniquify-exp env) e))]
     [(Var x)
      (Var (dict-ref env x))]
     [(Let x e body)
-     (letrec ([new-x (if (dict-has-key? env x) (gensym (append-point x)) x)])
+     (let ([new-x (gensym (append-point x))])
        (Let new-x ((uniquify-exp env) e) ((uniquify-exp (dict-set env x new-x)) body)))]
     [(Prim op es)
      (Prim op (for/list ([e es]) ((uniquify-exp env) e)))]
-    [(If c t e) (If ((uniquify-exp env) c) ((uniquify-exp env) t) ((uniquify-exp env) e))]
-    [e e]))
+    [(If c t e) (If ((uniquify-exp env) c) ((uniquify-exp env) t) ((uniquify-exp env) e))]))
 
 ;; uniquify : R1 -> R1
 (define/match (uniquify p)
@@ -78,9 +80,7 @@
          [(Def name params rty info body)
           (define new-env
             (for/fold ([new-env env]) ([p params])
-              (if (dict-has-key? env (car p))
-                (dict-set new-env (car p) (gensym (append-point (car p))))
-                (dict-set new-env (car p) (car p)))))
+              (dict-set new-env (car p) (car p))))
           (Def name params rty info ((uniquify-exp new-env) body))])))])
 
 (define/match (reveal-functions p)

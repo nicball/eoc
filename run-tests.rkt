@@ -28,8 +28,6 @@
           (string=? r (car (string-split p "_"))))
         all-tests)))
 
-; (debug-level 1)
-; (interp-tests "fun" type-check-Lfun compiler-passes interp-Lfun "functions_test" (tests-for "functions"))
 (debug-level 0)
 (interp-tests "var" type-check-Lfun compiler-passes interp-Lfun "var_test" (tests-for "var"))
 (interp-tests "cond" type-check-Lfun compiler-passes interp-Lfun "cond_test" (tests-for "cond"))
