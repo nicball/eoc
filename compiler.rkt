@@ -1,11 +1,11 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
-(require "interp-Lfun.rkt")
-(require "interp-Lfun-prime.rkt")
-(require "interp-Cfun.rkt")
-(require "type-check-Lfun.rkt")
-(require "type-check-Cfun.rkt")
+(require "interp-Llambda.rkt")
+(require "interp-Llambda-prime.rkt")
+(require "interp-Clambda.rkt")
+(require "type-check-Llambda.rkt")
+(require "type-check-Clambda.rkt")
 (require "utilities.rkt")
 (provide (all-defined-out))
 (require "interp.rkt")
@@ -27,9 +27,14 @@
 
 (define (log fmt e) (printf fmt e) e)
 
+(define (hash-remove* h keys)
+  (for/fold ([r h]) ([k keys])
+    (hash-remove r k)))
+
 (define ((induct-L f) e)
   (match e
-    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _)) (f e)]
+    [(Lambda params rty body) (f (Lambda params rty ((induct-L f) body)))]
+    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)) (f e)]
     [(Prim op args) (f (Prim op (map (induct-L f) args)))]
     [(Let x e body) (f (Let x ((induct-L f) e) ((induct-L f) body)))]
     [(If c t e) (f (If ((induct-L f) c) ((induct-L f) t) ((induct-L f) e)))]
@@ -37,7 +42,8 @@
     [(Begin effs e) (f (Begin (map (induct-L f) effs) ((induct-L f) e)))]
     [(WhileLoop c e) (f (WhileLoop ((induct-L f) c) ((induct-L f) e)))]
     [(HasType e t) (f (HasType ((induct-L f) e) t))]
-    [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]))
+    [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]
+    [(Closure arity exps) (f (Closure arity (map f exps)))]))
 
 (define/match (shrink p)
   [((ProgramDefsExp info defs exp))
@@ -53,6 +59,11 @@
 
 (define (uniquify-exp env)
   (match-lambda
+    [(Lambda params rty body)
+     (define new-env
+       (for/fold ([new-env env]) ([p params])
+         (dict-set new-env (car p) (car p))))
+     (Lambda params rty ((uniquify-exp new-env) body))]
     [(HasType e t) (HasType ((uniquify-exp env) e) t)]
     [(Apply f args) (Apply ((uniquify-exp env) f) (map (uniquify-exp env) args))]
     [(and exp (or (Void) (Int _) (Bool _))) exp]
@@ -68,7 +79,6 @@
      (Prim op (for/list ([e es]) ((uniquify-exp env) e)))]
     [(If c t e) (If ((uniquify-exp env) c) ((uniquify-exp env) t) ((uniquify-exp env) e))]))
 
-;; uniquify : R1 -> R1
 (define/match (uniquify p)
   [((ProgramDefs info defs))
    (define env
@@ -99,6 +109,148 @@
          [(Def name params rty info body)
           (Def name params rty info (reveal-functions-exp body))])))])
 
+(define/match (collect-set! exp)
+  [((or (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _))) (set)]
+  [((Apply e es)) (apply set-union (collect-set! e) (map collect-set! es))]
+  [((SetBang x e)) (set-union (set x) (collect-set! e))]
+  [((Begin effs e)) (apply set-union (collect-set! e) (map collect-set! effs))]
+  [((WhileLoop c e)) (set-union (uncover-get! c) (uncover-get! e))]
+  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _))) (set)]
+  [((If c t e)) (set-union (collect-set! c) (collect-set! t) (collect-set! e))]
+  [((Let _ e body)) (set-union (collect-set! e) (collect-set! body))]
+  [((Prim _ args)) (apply set-union (set) (map collect-set! args))]
+  [((Lambda _ _ body)) (collect-set! body)]
+  [((HasType e _)) (collect-set! e)]
+  [((Closure _ exps)) (apply set-union (set) (map collect-set! exps))])
+
+(define/match (free-variables exp)
+  [((or (Int _) (Bool _) (Void) (FunRef _ _))) (set)]
+  [((or (Collect _) (Allocate _ _) (GlobalValue _))) (error 'free-variables "impossible")]
+  [((Prim op args)) (apply set-union (set) (map free-variables args))]
+  [((Var x)) (set x)]
+  [((Let x e body)) (set-union (free-variables e) (set-subtract (free-variables body) (set x)))]
+  [((If c t e)) (set-union (free-variables c) (free-variables t) (free-variables e))]
+  [((SetBang x e)) (set-union (set x) (free-variables e))]
+  [((Begin effs e)) (apply set-union (free-variables e) (map free-variables effs))]
+  [((WhileLoop c e)) (set-union (free-variables c) (free-variables e))]
+  [((Apply f args)) (apply set-union (free-variables f) (map free-variables args))]
+  [((Lambda params _ body)) (set-subtract (free-variables body) (list->set (map car params)))]
+  [((HasType e _)) (free-variables e)]
+  [((Closure _ exps)) (apply set-union (set) (map free-variables exps))])
+
+(define/match (free-variables->type exp)
+  [((or (Int _) (Bool _) (Void) (FunRef _ _))) (hash)]
+  [((or (Collect _) (Allocate _ _) (GlobalValue _) (Var _))) (error 'free-variables->type "impossible ~a" exp)]
+  [((Prim op args)) (apply hash-union (hash) (map free-variables->type args))]
+  [((HasType (Var x) t)) (hash x t)]
+  [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
+  [((If c t e)) (hash-union (free-variables->type c) (free-variables->type t) (free-variables->type e))]
+  [((SetBang x e)) (hash-union (hash x) (free-variables->type e))]
+  [((Begin effs e)) (apply hash-union (free-variables->type e) (map free-variables->type effs))]
+  [((WhileLoop c e)) (hash-union (free-variables->type c) (free-variables->type e))]
+  [((Apply f args)) (apply hash-union (free-variables->type f) (map free-variables->type args))]
+  [((Lambda params _ body)) (hash-remove* (free-variables->type body) (map car params))]
+  [((HasType e _)) (free-variables->type e)]
+  [((Closure _ exps)) (apply hash-union (hash) (map free-variables->type exps))])
+
+(define (sorted-free-variables exp)
+  (sort (set->list (free-variables exp)) symbol<?)) 
+
+(define/match (captured-by-lambda exp)
+  [((or (Int _) (Bool _) (Void) (FunRef _ _) (Var _))) (set)]
+  [((or (Collect _) (Allocate _ _) (GlobalValue _) (Closure _ _))) (error 'captured-by-lambda "impossible")]
+  [((Prim op args)) (apply set-union (set) (map captured-by-lambda args))]
+  [((Let x e body)) (set-union (captured-by-lambda e) (captured-by-lambda body))]
+  [((If c t e)) (set-union (captured-by-lambda c) (captured-by-lambda t) (captured-by-lambda e))]
+  [((SetBang x e)) (captured-by-lambda e)]
+  [((Begin effs e)) (apply set-union (captured-by-lambda e) (map captured-by-lambda effs))]
+  [((WhileLoop c e)) (set-union (captured-by-lambda c) (captured-by-lambda e))]
+  [((Apply f args)) (apply set-union (captured-by-lambda f) (map captured-by-lambda args))]
+  [((Lambda params _ body)) (set-subtract (free-variables body) (list->set (map car params)))]
+  [((HasType e _)) (captured-by-lambda e)])
+  
+(define/match (convert-assignments p)
+  [((ProgramDefs info defs))
+   (define/match (convert-assignments-Def def)
+     [((Def name params rty info body))
+      (define captured (captured-by-lambda body))
+      (define boxed-params
+        (for/hash ([p params] #:when (set-member? captured (car p)))
+          (values (car p) (gensym (append-point (car p))))))
+      (define new-params 
+        (for/list ([p params])
+          (match p
+            [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
+      (define convert
+        (induct-L (match-lambda
+          [(Var x) #:when (set-member? captured x)
+           (Prim 'vector-ref (list (Var x) (Int 0)))]
+          [(SetBang x e) #:when (set-member? captured x)
+           (Prim 'vector-set! (list (Var x) (Int 0) e))]
+          [(Lambda params rty body)
+           (define boxed-params
+             (for/hash ([p params] #:when (set-member? captured (car p)))
+               (values (car p) (gensym (append-point (car p))))))
+           (define new-params 
+             (for/list ([p params])
+               (match p
+                 [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
+           (Lambda new-params rty
+             (for/foldr ([new-body body]) ([(p renamed) (in-dict boxed-params)])
+               (Let p (Prim 'vector (list (Var renamed))) new-body)))]
+          [exp exp])))
+      (Def name new-params rty info
+        (for/foldr ([new-body (convert body)]) ([(p renamed) (in-dict boxed-params)])
+          (Let p (Prim 'vector (list (Var renamed))) new-body)))])
+   (ProgramDefs info (map convert-assignments-Def defs))])
+
+(define/match (convert-closures p)
+  [((ProgramDefs info defs))
+   (define lifted-defs '())
+   (define/match (convert-type type)
+     [((list arg-tys ... '-> rty))
+      (list 'Vector `((Vector _) ,@(map convert-type arg-tys) -> ,(convert-type rty)))]
+     [(type) type])
+   (define (convert-params closure-var closure-type params)
+     (cons (list closure-var ': closure-type)
+       (for/list ([p params])
+         (match p
+           [(list x ': t) (list x ': (convert-type t))]))))
+   (define/match (lift-lambda lmd)
+     [((Lambda params rty body))
+      (define fvs (sorted-free-variables lmd))
+      (define fv->type (free-variables->type lmd))
+      (define closure-type `(Vector _ ,@(for/list ([v fvs]) (dict-ref fv->type v))))
+      (define closure-var (gensym 'closure.))
+      (define lambda-name (gensym 'lambda.))
+      (define new-body
+        (for/foldr ([new-body body]) ([fv fvs] [n (in-naturals)])
+          (Let fv (Prim 'vector-ref (list (Var closure-var) (Int (+ 1 n)))) new-body)))
+      (set! lifted-defs
+        (cons (Def lambda-name (convert-params closure-var closure-type params) (convert-type rty) '() new-body)
+              lifted-defs))
+      (define arity (length params)) ; TODO: verify this
+      (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (HasType (Var v) (dict-ref fv->type v)))))])
+   (define convert-exp
+     (induct-L (match-lambda
+       [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
+       [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
+       [(Apply f args)
+        (define closure-var (gensym 'closure.))
+        (Let closure-var f
+          (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
+       [exp exp])))
+   (define/match (convert-def def)
+     [((Def name params rty info body))
+      (define new-params
+        (if (eq? name 'main)
+          (for/list ([p params])
+            (match p
+              [(list x ': t) (list x ': (convert-type t))]))
+          (convert-params (gensym 'closure.) '(Vector _) params)))
+      (Def name new-params (convert-type rty) info (convert-exp body))])
+   (ProgramDefs info (append (map convert-def defs) lifted-defs))])
+  
 (define/match (limit-functions p)
   [((ProgramDefs info defs))
    (define/match (limit-functions-Def def)
@@ -130,9 +282,8 @@
      (induct-L (match-lambda
        [(HasType (Prim 'vector es) type)
         (define (eval-elems es xs body)
-          (match es
-            [(cons e es) (Let (car xs) e (eval-elems es (cdr xs) body))]
-            ['() body]))
+          (for/foldr ([exp body]) ([x xs] [e es])
+            (Let x e exp)))
         (define n (length es))
         (define allocation-size (* 8 (+ 1 n)))
         (define check-enough-space
@@ -149,6 +300,26 @@
             (Let vector-var (Allocate n type)
               (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
                 (Var vector-var)))))]
+       [(HasType (Closure arity es) type)
+        (define (eval-elems es xs body)
+          (for/foldr ([exp body]) ([x xs] [e es])
+            (Let x e exp)))
+        (define n (length es))
+        (define allocation-size (* 8 (+ 1 n)))
+        (define check-enough-space
+          (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
+                             (GlobalValue 'fromspace_end)))
+            (Void)
+            (Collect allocation-size)))
+        (define closure-var (gensym 'closure.))
+        (define elems-vars
+          (for/list ([i (in-range n)])
+            (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
+        (eval-elems es elems-vars
+          (Begin (list check-enough-space)
+            (Let closure-var (AllocateClosure n type arity)
+              (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var closure-var) (Int i) (Var v))))
+                (Var closure-var)))))]
        [exp exp])))
    (ProgramDefs info
      (for/list ([def defs])
@@ -158,16 +329,6 @@
 
 (define/match (uncover-get! p)
   [((ProgramDefs info defs))
-   (define/match (collect-set! exp)
-     [((or (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _))) (set)]
-     [((Apply e es)) (apply set-union (collect-set! e) (map collect-set! es))]
-     [((SetBang x e)) (set-union (set x) (collect-set! e))]
-     [((Begin effs e)) (apply set-union (collect-set! e) (map collect-set! effs))]
-     [((WhileLoop c e)) (set-union (uncover-get! c) (uncover-get! e))]
-     [((or (Void) (Bool _) (Var _) (Int _) (GetBang _))) (set)]
-     [((If c t e)) (set-union (collect-set! c) (collect-set! t) (collect-set! e))]
-     [((Let x e body)) (set-union (collect-set! e) (collect-set! body))]
-     [((Prim op args)) (apply set-union (set) (map collect-set! args))])
    (define uncover-get!-exp
      (induct-L (match-lambda
        [(Prim op args)
@@ -185,7 +346,6 @@
          [(Def name params rty info body)
           (Def name params rty info (uncover-get!-exp body))])))])
 
-;; remove-complex-operands : R1 -> R1
 (define/match (remove-complex-operands p)
   [((ProgramDefs info defs))
    (define (unzip lst) (foldr (lambda (p acc) (cons (cons (car p) (car acc)) (cons (cdr p) (cdr acc)))) (cons '() '()) lst))
@@ -214,12 +374,13 @@
      [((Collect _)) (gensym 'collect.)]
      [((Allocate _ _)) (gensym 'allocate.)]
      [((GlobalValue x)) (gensym (append-point x))]
-     [((FunRef _ _)) (gensym 'fun-ref.)])
+     [((FunRef _ _)) (gensym 'fun-ref.)]
+     [((AllocateClosure _ _ _)) (gensym 'allocate.closure.)])
    (define/match (rco-atom e)
      [((GetBang x))
       (let ([xx (gensym (append-point x))])
         (values (list (cons xx (Var x))) (Var xx)))]
-     [((or (Begin _ _) (If _ _ _) (Let _ _ _) (Prim _ _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _)))
+     [((or (Begin _ _) (If _ _ _) (Let _ _ _) (Prim _ _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)))
       (let ([x (exp->symbol e)])
         (values (list (cons x (rco-exp e))) (Var x)))]
      [(_) (values '() e)])
@@ -229,7 +390,6 @@
          [(Def name params rty info body)
           (Def name params rty info (rco-exp body))])))])
 
-;; explicate-control : R1 -> C0
 (define/match (explicate-control-Def def)
   [((Def name params rty info body))
    (define blocks (make-hash))
@@ -262,7 +422,7 @@
         (Seq (Prim 'vector-set! args) (explicate-effects effs cont))]
        [(cons (Collect n) effs)
         (Seq (Collect n) (explicate-effects effs cont))]
-       [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _)) effs)
+       [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _) (AllocateClosure _ _ _)) effs)
         (explicate-effects effs cont)]
        [(cons (If c t e) effs)
         (let ([cont (emit-block 'effs. (explicate-effects effs cont))])
@@ -321,7 +481,6 @@
   [((ProgramDefs info defs))
    (ProgramDefs info (map explicate-control-Def defs))])
 
-;; select-instructions : C0 -> pseudo-x86
 (define argument-passing-registers (map Reg '(rdi rsi rdx rcx r8 r9)))
 
 (define/match (select-instructions-Def p)
@@ -331,11 +490,17 @@
      (define pointer-mask
        (for/fold ([mask 0]) ([i (in-naturals)] [t elem-types])
          (bitwise-ior mask
-           (match t
-             [(list 'Vector _ ...) (arithmetic-shift 1 (+ 7 i))]
-             [_ 0]))))
+           (if (Vector? t)
+             (arithmetic-shift 1 (+ 7 i))
+             0))))
      (define vector-length (arithmetic-shift (length elem-types) 1))
      (bitwise-ior pointer-mask vector-length))
+   (define (closure-tag closure-type)
+     (define fun-type (list-ref closure-type 1))
+     (define arity (- (length fun-type) 3))
+     (define elem-types (drop closure-type 1))
+     (bitwise-ior (vector-tag elem-types)
+       (arithmetic-shift 58 arity)))
    (define cmp->cc
      '((eq? . e) (< . l) (<= . le) (> . g) (>= . ge)))
    (define/match (si-atom atom)
@@ -377,6 +542,19 @@
         (Instr 'addq (list (Imm (vector-offset n)) (Global 'free_ptr)))
         (Instr 'movq (list (Imm (vector-tag elem-types)) (Deref 'r11 0)))
         (Instr 'movq (list (Reg 'r11) x)))]
+     [((Assign x (AllocateClosure n type arity)))
+      (list
+        (Instr 'movq (list (Global 'free_ptr) (Reg 'r11)))
+        (Instr 'addq (list (Imm (vector-offset n)) (Global 'free_ptr)))
+        (Instr 'movq (list (Imm (closure-tag type)) (Deref 'r11 0)))
+        (Instr 'movq (list (Reg 'r11) x)))]
+     [((Assign x (Prim 'procedure-arity (list c))))
+      (list
+        (Instr 'movq (list (si-atom c) (Reg 'r11)))
+        (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
+        (Instr 'sarq (list (Imm 58) (Reg 'rax)))
+        (Instr 'andq (list (Imm 31) (Reg 'rax)))
+        (Instr 'movq (list (Reg 'rax) x)))]
      [((Collect n))
       (list
         (Instr 'movq (list (Reg 'r15) (Reg 'rdi)))
@@ -439,7 +617,6 @@
   [((ProgramDefs info defs))
    (ProgramDefs info (map select-instructions-Def defs))])
 
-;; uncover-live : x86Var -> x86Var
 (define/match (location? atom)
   [((or (Reg _) (Var _))) #t]
   [(_) #f])
@@ -661,7 +838,6 @@
   [((ProgramDefs info defs))
    (ProgramDefs info (map allocate-registers-Def defs))])
 
-;; patch-instructions : psuedo-x86 -> x86
 (define/match (patch-instructions-Def def)
   [((Def name '() 'Integer info blocks))
    (define/match (patch instr)
@@ -695,7 +871,6 @@
   [((ProgramDefs info defs))
    (ProgramDefs info (map patch-instructions-Def defs))])
 
-;; prelude-and-conclusion : x86 -> x86
 (define/match (prelude-and-conclusion-Def p)
   [((Def name '() 'Integer info blocks))
    (define used-callee-saved-registers (dict-ref info 'used-callee-saved-registers))
@@ -769,23 +944,25 @@
    ;(ProgramDefs info (map prelude-and-conclusion-Def defs))])
    (X86Program info (apply hash-union (map prelude-and-conclusion-Def defs)))])
   
-;; Define the compiler passes to be used by interp-tests and the grader
-;; Note that your compiler file (the file that defines the passes)
-;; must be named "compiler.rkt"
+(define (var-annotated-type-check-Llambda e)
+  (parameterize ([typed-vars #t])
+    (type-check-Llambda e)))
+  
 (define compiler-passes
-  `( ("shrink" ,shrink ,interp-Lfun ,type-check-Lfun)
-     ("uniquify" ,uniquify ,interp-Lfun ,type-check-Lfun)
-     ("reveal FunRef" ,reveal-functions ,interp-Lfun-prime ,type-check-Lfun)
-     ("limit funtion parameters" ,limit-functions ,interp-Lfun-prime ,type-check-Lfun)
-     ("elaborate" ,type-check-Lfun ,interp-Lfun-prime ,type-check-Lfun)
-     ("expose allocation" ,expose-allocation ,interp-Lfun-prime ,type-check-Lfun)
-     ("uncover get!" ,uncover-get! ,interp-Lfun-prime ,type-check-Lfun)
-     ("remove complex operands" ,remove-complex-operands ,interp-Lfun-prime ,type-check-Lfun)
-     ("explicate control" ,explicate-control ,interp-Cfun ,type-check-Cfun)
-     ("instruction selection" ,select-instructions ,interp-x86-3)
-     ("liveness analysis" ,uncover-live ,interp-x86-3)
-     ("build interference graph" ,build-interference ,interp-x86-3)
-     ("allocate registers" ,allocate-registers ,interp-x86-3)
-     ("patch instructions" ,patch-instructions ,interp-x86-3)
+  `( ("shrink" ,shrink ,interp-Llambda ,type-check-Llambda)
+     ("uniquify" ,uniquify ,interp-Llambda ,type-check-Llambda)
+     ("reveal FunRef" ,reveal-functions ,interp-Llambda-prime ,type-check-Llambda)
+     ("convert assignments" ,convert-assignments ,interp-Llambda-prime ,var-annotated-type-check-Llambda)
+     ("convert closures" ,convert-closures ,interp-Llambda-prime ,type-check-Llambda)
+     ("limit funtion parameters" ,limit-functions ,interp-Llambda-prime ,type-check-Llambda)
+     ("expose allocation" ,expose-allocation ,interp-Llambda-prime ,type-check-Llambda)
+     ("uncover get!" ,uncover-get! ,interp-Llambda-prime ,type-check-Llambda)
+     ("remove complex operands" ,remove-complex-operands ,interp-Llambda-prime ,type-check-Llambda)
+     ("explicate control" ,explicate-control ,interp-Clambda ,type-check-Clambda)
+     ("instruction selection" ,select-instructions ,interp-x86-4)
+     ("liveness analysis" ,uncover-live ,interp-x86-4)
+     ("build interference graph" ,build-interference ,interp-x86-4)
+     ("allocate registers" ,allocate-registers ,interp-x86-4)
+     ("patch instructions" ,patch-instructions ,interp-x86-4)
      ("prelude and conclusion" ,prelude-and-conclusion #f)
      ))
