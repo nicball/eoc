@@ -944,7 +944,7 @@
    ;(ProgramDefs info (map prelude-and-conclusion-Def defs))])
    (X86Program info (apply hash-union (map prelude-and-conclusion-Def defs)))])
   
-(define (var-annotated-type-check-Llambda e)
+(define (annotate-var-type e)
   (parameterize ([typed-vars #t])
     (type-check-Llambda e)))
   
@@ -952,7 +952,8 @@
   `( ("shrink" ,shrink ,interp-Llambda ,type-check-Llambda)
      ("uniquify" ,uniquify ,interp-Llambda ,type-check-Llambda)
      ("reveal FunRef" ,reveal-functions ,interp-Llambda-prime ,type-check-Llambda)
-     ("convert assignments" ,convert-assignments ,interp-Llambda-prime ,var-annotated-type-check-Llambda)
+     ("convert assignments" ,convert-assignments ,interp-Llambda-prime ,type-check-Llambda)
+     ("annotate var types" ,(lambda (x) x) ,interp-Llambda-prime ,annotate-var-type)
      ("convert closures" ,convert-closures ,interp-Llambda-prime ,type-check-Llambda)
      ("limit funtion parameters" ,limit-functions ,interp-Llambda-prime ,type-check-Llambda)
      ("expose allocation" ,expose-allocation ,interp-Llambda-prime ,type-check-Llambda)
