@@ -45,13 +45,27 @@
     [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]
     [(Closure arity exps) (f (Closure arity (map f exps)))]))
 
+(define/match (subexpressions exp)
+  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _))) '()]
+  [((Apply e es)) (cons e es)]
+  [((SetBang _ e)) (list e)]
+  [((Begin effs e)) (append effs (list e))]
+  [((WhileLoop c e)) (list c e)]
+  [((If c t e)) (list c t e)]
+  [((Let _ e body)) (list e body)]
+  [((Prim _ args)) args]
+  [((Lambda _ _ body)) (list body)]
+  [((HasType e _)) (list e)]
+  [((Closure _ es)) es])
+
 (define/match (shrink p)
   [((ProgramDefsExp info defs exp))
    (define shrink-exp
-     (induct-L (match-lambda
-       [(Prim 'and (list a b)) (If a b (Bool #f))]
-       [(Prim 'or (list a b)) (If a (Bool #t) b)]
-       [exp exp])))
+     (induct-L
+       (match-lambda
+         [(Prim 'and (list a b)) (If a b (Bool #f))]
+         [(Prim 'or (list a b)) (If a (Bool #t) b)]
+         [exp exp])))
    (define/match (shrink-Def def)
      [((Def name params rty info body))
       (Def name params rty info (shrink-exp body))])
@@ -99,10 +113,11 @@
      (for/hash ([def defs])
        (values (Def-name def) (length (Def-param* def)))))
    (define reveal-functions-exp
-     (induct-L (match-lambda
-       [(Var x) #:when (dict-has-key? fun->arity x)
-        (FunRef x (dict-ref fun->arity x))]
-       [exp exp])))
+     (induct-L
+       (match-lambda
+         [(Var x) #:when (dict-has-key? fun->arity x)
+          (FunRef x (dict-ref fun->arity x))]
+         [exp exp])))
    (ProgramDefs info
      (for/list ([def defs])
        (match def
@@ -110,64 +125,22 @@
           (Def name params rty info (reveal-functions-exp body))])))])
 
 (define/match (collect-set! exp)
-  [((or (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _))) (set)]
-  [((Apply e es)) (apply set-union (collect-set! e) (map collect-set! es))]
   [((SetBang x e)) (set-union (set x) (collect-set! e))]
-  [((Begin effs e)) (apply set-union (collect-set! e) (map collect-set! effs))]
-  [((WhileLoop c e)) (set-union (uncover-get! c) (uncover-get! e))]
-  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _))) (set)]
-  [((If c t e)) (set-union (collect-set! c) (collect-set! t) (collect-set! e))]
-  [((Let _ e body)) (set-union (collect-set! e) (collect-set! body))]
-  [((Prim _ args)) (apply set-union (set) (map collect-set! args))]
-  [((Lambda _ _ body)) (collect-set! body)]
-  [((HasType e _)) (collect-set! e)]
-  [((Closure _ exps)) (apply set-union (set) (map collect-set! exps))])
+  [(_) (apply set-union (set) (map collect-set! (subexpressions exp)))])
 
 (define/match (free-variables exp)
-  [((or (Int _) (Bool _) (Void) (FunRef _ _))) (set)]
-  [((or (Collect _) (Allocate _ _) (GlobalValue _))) (error 'free-variables "impossible")]
-  [((Prim op args)) (apply set-union (set) (map free-variables args))]
   [((Var x)) (set x)]
   [((Let x e body)) (set-union (free-variables e) (set-subtract (free-variables body) (set x)))]
-  [((If c t e)) (set-union (free-variables c) (free-variables t) (free-variables e))]
-  [((SetBang x e)) (set-union (set x) (free-variables e))]
-  [((Begin effs e)) (apply set-union (free-variables e) (map free-variables effs))]
-  [((WhileLoop c e)) (set-union (free-variables c) (free-variables e))]
-  [((Apply f args)) (apply set-union (free-variables f) (map free-variables args))]
   [((Lambda params _ body)) (set-subtract (free-variables body) (list->set (map car params)))]
-  [((HasType e _)) (free-variables e)]
-  [((Closure _ exps)) (apply set-union (set) (map free-variables exps))])
-
-(define/match (free-variables->type exp)
-  [((or (Int _) (Bool _) (Void) (FunRef _ _))) (hash)]
-  [((or (Collect _) (Allocate _ _) (GlobalValue _) (Var _))) (error 'free-variables->type "impossible ~a" exp)]
-  [((Prim op args)) (apply hash-union (hash) (map free-variables->type args))]
-  [((HasType (Var x) t)) (hash x t)]
-  [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
-  [((If c t e)) (hash-union (free-variables->type c) (free-variables->type t) (free-variables->type e))]
-  [((SetBang x e)) (hash-union (hash x) (free-variables->type e))]
-  [((Begin effs e)) (apply hash-union (free-variables->type e) (map free-variables->type effs))]
-  [((WhileLoop c e)) (hash-union (free-variables->type c) (free-variables->type e))]
-  [((Apply f args)) (apply hash-union (free-variables->type f) (map free-variables->type args))]
-  [((Lambda params _ body)) (hash-remove* (free-variables->type body) (map car params))]
-  [((HasType e _)) (free-variables->type e)]
-  [((Closure _ exps)) (apply hash-union (hash) (map free-variables->type exps))])
+  [((SetBang x e)) (set-union (set x) (free-variables e))]
+  [(_) (apply set-union (set) (map free-variables (subexpressions exp)))])
 
 (define (sorted-free-variables exp)
   (sort (set->list (free-variables exp)) symbol<?)) 
 
 (define/match (captured-by-lambda exp)
-  [((or (Int _) (Bool _) (Void) (FunRef _ _) (Var _))) (set)]
-  [((or (Collect _) (Allocate _ _) (GlobalValue _) (Closure _ _))) (error 'captured-by-lambda "impossible")]
-  [((Prim op args)) (apply set-union (set) (map captured-by-lambda args))]
-  [((Let x e body)) (set-union (captured-by-lambda e) (captured-by-lambda body))]
-  [((If c t e)) (set-union (captured-by-lambda c) (captured-by-lambda t) (captured-by-lambda e))]
-  [((SetBang x e)) (captured-by-lambda e)]
-  [((Begin effs e)) (apply set-union (captured-by-lambda e) (map captured-by-lambda effs))]
-  [((WhileLoop c e)) (set-union (captured-by-lambda c) (captured-by-lambda e))]
-  [((Apply f args)) (apply set-union (captured-by-lambda f) (map captured-by-lambda args))]
-  [((Lambda params _ body)) (set-subtract (free-variables body) (list->set (map car params)))]
-  [((HasType e _)) (captured-by-lambda e)])
+  [((Lambda params _ body)) (set-union (captured-by-lambda body) (set-subtract (free-variables body) (list->set (map car params))))]
+  [(_) (apply set-union (set) (map captured-by-lambda (subexpressions exp)))])
   
 (define/match (convert-assignments p)
   [((ProgramDefs info defs))
@@ -182,23 +155,24 @@
           (match p
             [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
       (define convert
-        (induct-L (match-lambda
-          [(Var x) #:when (set-member? captured x)
-           (Prim 'vector-ref (list (Var x) (Int 0)))]
-          [(SetBang x e) #:when (set-member? captured x)
-           (Prim 'vector-set! (list (Var x) (Int 0) e))]
-          [(Lambda params rty body)
-           (define boxed-params
-             (for/hash ([p params] #:when (set-member? captured (car p)))
-               (values (car p) (gensym (append-point (car p))))))
-           (define new-params 
-             (for/list ([p params])
-               (match p
-                 [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
-           (Lambda new-params rty
-             (for/foldr ([new-body body]) ([(p renamed) (in-dict boxed-params)])
-               (Let p (Prim 'vector (list (Var renamed))) new-body)))]
-          [exp exp])))
+        (induct-L
+          (match-lambda
+            [(Var x) #:when (set-member? captured x)
+             (Prim 'vector-ref (list (Var x) (Int 0)))]
+            [(SetBang x e) #:when (set-member? captured x)
+             (Prim 'vector-set! (list (Var x) (Int 0) e))]
+            [(Lambda params rty body)
+             (define boxed-params
+               (for/hash ([p params] #:when (set-member? captured (car p)))
+                 (values (car p) (gensym (append-point (car p))))))
+             (define new-params 
+               (for/list ([p params])
+                 (match p
+                   [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
+             (Lambda new-params rty
+               (for/foldr ([new-body body]) ([(p renamed) (in-dict boxed-params)])
+                 (Let p (Prim 'vector (list (Var renamed))) new-body)))]
+            [exp exp])))
       (Def name new-params rty info
         (for/foldr ([new-body (convert body)]) ([(p renamed) (in-dict boxed-params)])
           (Let p (Prim 'vector (list (Var renamed))) new-body)))])
@@ -219,6 +193,11 @@
    (define/match (lift-lambda lmd)
      [((Lambda params rty body))
       (define fvs (sorted-free-variables lmd))
+      (define/match (free-variables->type exp)
+        [((HasType (Var x) t)) (hash x t)]
+        [((Lambda params _ body)) (hash-remove* (free-variables->type body) (map car params))]
+        [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
+        [(_) (apply hash-union (hash) (map free-variables->type (subexpressions exp)))])
       (define fv->type (free-variables->type lmd))
       (define closure-type `(Vector _ ,@(for/list ([v fvs]) (dict-ref fv->type v))))
       (define closure-var (gensym 'closure.))
@@ -232,14 +211,15 @@
       (define arity (length params)) ; TODO: verify this
       (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (HasType (Var v) (dict-ref fv->type v)))))])
    (define convert-exp
-     (induct-L (match-lambda
-       [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
-       [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
-       [(Apply f args)
-        (define closure-var (gensym 'closure.))
-        (Let closure-var f
-          (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
-       [exp exp])))
+     (induct-L
+       (match-lambda
+         [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
+         [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
+         [(Apply f args)
+          (define closure-var (gensym 'closure.))
+          (Let closure-var f
+            (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
+         [exp exp])))
    (define/match (convert-def def)
      [((Def name params rty info body))
       (define new-params
@@ -260,67 +240,70 @@
       (define rest-var (gensym 'rest-params.))
       (define new-params (append (take params 5) (list (list rest-var ': (cons 'Vector rest-types)))))
       (define rename-exp
-        (induct-L (match-lambda
-          [(Var x) #:when (set-member? rest-names x)
-           (Prim 'vector-ref (list (Var rest-var) (Int (index-of rest-names x))))]
-          [(Apply e es) #:when (> (length es) 6)
-           (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
-          [exp exp])))
+        (induct-L
+          (match-lambda
+            [(Var x) #:when (set-member? rest-names x)
+             (Prim 'vector-ref (list (Var rest-var) (Int (index-of rest-names x))))]
+            [(Apply e es) #:when (> (length es) 6)
+             (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
+            [exp exp])))
       (Def name new-params rty info (rename-exp body))]
      [((Def name params rty info body))
       (define rename-exp
-        (induct-L (match-lambda
-          [(Apply e es) #:when (> (length es) 6)
-           (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
-          [exp exp])))
+        (induct-L
+          (match-lambda
+            [(Apply e es) #:when (> (length es) 6)
+             (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
+            [exp exp])))
       (Def name params rty info (rename-exp body))])
    (ProgramDefs info (map limit-functions-Def defs))])
 
 (define/match (expose-allocation p)
   [((ProgramDefs info defs))
    (define expose-allocation-exp
-     (induct-L (match-lambda
-       [(HasType (Prim 'vector es) type)
-        (define (eval-elems es xs body)
-          (for/foldr ([exp body]) ([x xs] [e es])
-            (Let x e exp)))
-        (define n (length es))
-        (define allocation-size (* 8 (+ 1 n)))
-        (define check-enough-space
-          (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
-                             (GlobalValue 'fromspace_end)))
-            (Void)
-            (Collect allocation-size)))
-        (define vector-var (gensym 'vector.))
-        (define elems-vars
-          (for/list ([i (in-range n)])
-            (gensym (symbol-append 'vector.elem. (append-point (string->symbol (number->string i)))))))
-        (eval-elems es elems-vars
-          (Begin (list check-enough-space)
-            (Let vector-var (Allocate n type)
-              (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
-                (Var vector-var)))))]
-       [(HasType (Closure arity es) type)
-        (define (eval-elems es xs body)
-          (for/foldr ([exp body]) ([x xs] [e es])
-            (Let x e exp)))
-        (define n (length es))
-        (define allocation-size (* 8 (+ 1 n)))
-        (define check-enough-space
-          (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
-                             (GlobalValue 'fromspace_end)))
-            (Void)
-            (Collect allocation-size)))
-        (define closure-var (gensym 'closure.))
-        (define elems-vars
-          (for/list ([i (in-range n)])
-            (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
-        (eval-elems es elems-vars
-          (Begin (list check-enough-space)
-            (Let closure-var (AllocateClosure n type arity)
-              (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var closure-var) (Int i) (Var v))))
-                (Var closure-var)))))]
-       [exp exp])))
+     (induct-L
+       (match-lambda
+         [(HasType (Prim 'vector es) type)
+          (define (eval-elems es xs body)
+            (for/foldr ([exp body]) ([x xs] [e es])
+              (Let x e exp)))
+          (define n (length es))
+          (define allocation-size (* 8 (+ 1 n)))
+          (define check-enough-space
+            (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
+                               (GlobalValue 'fromspace_end)))
+              (Void)
+              (Collect allocation-size)))
+          (define vector-var (gensym 'vector.))
+          (define elems-vars
+            (for/list ([i (in-range n)])
+              (gensym (symbol-append 'vector.elem. (append-point (string->symbol (number->string i)))))))
+          (eval-elems es elems-vars
+            (Begin (list check-enough-space)
+              (Let vector-var (Allocate n type)
+                (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
+                  (Var vector-var)))))]
+         [(HasType (Closure arity es) type)
+          (define (eval-elems es xs body)
+            (for/foldr ([exp body]) ([x xs] [e es])
+              (Let x e exp)))
+          (define n (length es))
+          (define allocation-size (* 8 (+ 1 n)))
+          (define check-enough-space
+            (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
+                               (GlobalValue 'fromspace_end)))
+              (Void)
+              (Collect allocation-size)))
+          (define closure-var (gensym 'closure.))
+          (define elems-vars
+            (for/list ([i (in-range n)])
+              (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
+          (eval-elems es elems-vars
+            (Begin (list check-enough-space)
+              (Let closure-var (AllocateClosure n type arity)
+                (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var closure-var) (Int i) (Var v))))
+                  (Var closure-var)))))]
+         [exp exp])))
    (ProgramDefs info
      (for/list ([def defs])
        (match def
@@ -330,16 +313,17 @@
 (define/match (uncover-get! p)
   [((ProgramDefs info defs))
    (define uncover-get!-exp
-     (induct-L (match-lambda
-       [(Prim op args)
-        (let ([muts (apply set-union (set) (map collect-set! args))])
-          (Prim op
-            (for/list ([arg args])
-              (match arg
-                [(Var x) #:when (set-member? muts x)
-                 (GetBang x)]
-                [_ arg]))))]
-       [exp exp])))
+     (induct-L
+       (match-lambda
+         [(Prim op args)
+          (let ([muts (apply set-union (set) (map collect-set! args))])
+            (Prim op
+              (for/list ([arg args])
+                (match arg
+                  [(Var x) #:when (set-member? muts x)
+                   (GetBang x)]
+                  [_ arg]))))]
+         [exp exp])))
    (ProgramDefs info
      (for/list ([def defs])
        (match def
@@ -350,22 +334,23 @@
   [((ProgramDefs info defs))
    (define (unzip lst) (foldr (lambda (p acc) (cons (cons (car p) (car acc)) (cons (cdr p) (cdr acc)))) (cons '() '()) lst))
    (define rco-exp
-     (induct-L (match-lambda
-       [(Prim op args)
-        (define-values (bindings atoms)
-          (for/fold ([bindings '()] [atoms '()]) ([exp args])
-            (let-values ([(bs a) (rco-atom exp)])
-              (values (append bindings bs) (append atoms (list a))))))
-        (for/foldr ([exp (Prim op atoms)]) ([binding bindings])
-          (Let (car binding) (cdr binding) exp))]
-       [(Apply f args)
-        (define-values (bindings atoms)
-          (for/fold ([bindings '()] [atoms '()]) ([exp (cons f args)])
-            (let-values ([(bs a) (rco-atom exp)])
-              (values (append bindings bs) (append atoms (list a))))))
-        (for/foldr ([exp (Apply (car atoms) (cdr atoms))]) ([binding bindings])
-          (Let (car binding) (cdr binding) exp))]
-       [e e])))
+     (induct-L
+       (match-lambda
+         [(Prim op args)
+          (define-values (bindings atoms)
+            (for/fold ([bindings '()] [atoms '()]) ([exp args])
+              (let-values ([(bs a) (rco-atom exp)])
+                (values (append bindings bs) (append atoms (list a))))))
+          (for/foldr ([exp (Prim op atoms)]) ([binding bindings])
+            (Let (car binding) (cdr binding) exp))]
+         [(Apply f args)
+          (define-values (bindings atoms)
+            (for/fold ([bindings '()] [atoms '()]) ([exp (cons f args)])
+              (let-values ([(bs a) (rco-atom exp)])
+                (values (append bindings bs) (append atoms (list a))))))
+          (for/foldr ([exp (Apply (car atoms) (cdr atoms))]) ([binding bindings])
+            (Let (car binding) (cdr binding) exp))]
+         [e e])))
    (define/match (exp->symbol e)
      [((Begin _ _)) (gensym 'op.begin.)]
      [((If _ _ _)) (gensym 'op.if.)]
@@ -807,9 +792,6 @@
          (make-immutable-hash (for/list ([p reg-variables] #:when (Var? (car p))) (cons (car p) (dict-ref color->reg (cdr p)))))
          (make-immutable-hash (for/list ([p stack-variables] [i (in-naturals)]) (cons (car p) (Deref 'rbp (* -8 (+ 1 i))))))
          (make-immutable-hash (for/list ([p root-variables] [i (in-naturals)]) (cons (car p) (Deref 'r15 (* -8 (+ 1 i)))))))))
-   ; (displayln "==============ATTENTION===============")
-   ; (printf "~a ~a ~a\n" variable->reg variable->stack variable->root)
-   ; (displayln (graphviz interference))
    (define (transform-instr instr)
      (define/match (transform-arg arg)
        [((Var x))
