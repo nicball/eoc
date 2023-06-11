@@ -1,11 +1,13 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
-(require "interp-Llambda.rkt")
-(require "interp-Llambda-prime.rkt")
-(require "interp-Clambda.rkt")
+(require "interp-Ldyn.rkt")
+(require "interp-Lany.rkt")
+(require "interp-Lany-prime.rkt")
+(require "type-check-Lany.rkt")
 (require "type-check-Llambda.rkt")
-(require "type-check-Clambda.rkt")
+(require "interp-Cany.rkt")
+(require "type-check-Cany.rkt")
 (require "utilities.rkt")
 (provide (all-defined-out))
 (require "interp.rkt")
@@ -20,10 +22,9 @@
 
 (define (append-point sym) (symbol-append sym (string->symbol ".")))
 
-(define (Vector? type)
-  (match type
-    [(list 'Vector _ ...) #t]
-    [_ #f]))
+(define/match (gc-type? ty)
+  [((or 'Any `(Vector ,_ ...))) #t]
+  [(_) #f])
 
 (define (log fmt e) (printf fmt e) e)
 
@@ -33,8 +34,13 @@
 
 (define ((induct-L f) e)
   (match e
+    [(Inject e t) (f (Inject ((induct-L f) e) t))]
+    [(Project e t) (f (Project ((induct-L f) e) t))]
+    [(ValueOf e t) (f (ValueOf ((induct-L f) e) t))]
     [(Lambda params rty body) (f (Lambda params rty ((induct-L f) body)))]
-    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)) (f e)]
+    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _)
+         (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (Exit))
+     (f e)]
     [(Prim op args) (f (Prim op (map (induct-L f) args)))]
     [(Let x e body) (f (Let x ((induct-L f) e) ((induct-L f) body)))]
     [(If c t e) (f (If ((induct-L f) c) ((induct-L f) t) ((induct-L f) e)))]
@@ -46,7 +52,10 @@
     [(Closure arity exps) (f (Closure arity (map f exps)))]))
 
 (define/match (subexpressions exp)
-  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _))) '()]
+  [((or (Inject e _) (Project e _) (ValueOf e _))) (list e)]
+  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _)
+        (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (Exit)))
+    '()]
   [((Apply e es)) (cons e es)]
   [((SetBang _ e)) (list e)]
   [((Begin effs e)) (append effs (list e))]
@@ -58,21 +67,52 @@
   [((HasType e _)) (list e)]
   [((Closure _ es)) es])
 
-(define/match (shrink p)
+(define/match (type-tag ty)
+  [('Integer) #b001]
+  [('Boolean) #b100]
+  [(`(Vector ,_ ...)) #b010]
+  [(`(,_ ... -> ,_)) #b011]
+  [('Void) #b101])
+
+(define/match (strip-types prog)
   [((ProgramDefsExp info defs exp))
    
+   (define/match (strip-types-param param)
+     [((list x ': _)) x]
+     [(x) x])
+  
+   (define strip-types-exp
+     (induct-L
+       (match-lambda
+         [(Lambda params rty body) (Lambda (map strip-types-param params) '_ body)]
+         [exp exp])))
+   
+   (define/match (strip-types-Def def)
+     [((Def name params rty info body))
+      (Def name (map strip-types-param params) '_ info (strip-types-exp body))])
+  
+   (ProgramDefsExp info (map strip-types-Def defs) (strip-types-exp exp))]
+  
+  [((Program info exp))
+   (strip-types (ProgramDefsExp info '() exp))])
+
+(define/match (shrink p)
+  [((ProgramDefsExp info defs exp))
+
    (define shrink-exp
      (induct-L
        (match-lambda
          [(Prim 'and (list a b)) (If a b (Bool #f))]
          [(Prim 'or (list a b)) (If a (Bool #t) b)]
          [exp exp])))
-   
+
    (define/match (shrink-Def def)
      [((Def name params rty info body))
       (Def name params rty info (shrink-exp body))])
-   
-   (ProgramDefs info (append (map shrink-Def defs) (list (shrink-Def (Def 'main '() 'Integer (hash) exp)))))])
+
+   (ProgramDefs info (append (map shrink-Def defs) (list (shrink-Def (Def 'main '() 'Integer (hash) exp)))))]
+  [((Program info exp))
+   (shrink (ProgramDefsExp info '() exp))])
 
 (define/match (uniquify p)
   [((ProgramDefs info defs))
@@ -82,7 +122,7 @@
        [(Lambda params rty body)
         (define new-env
           (for/fold ([new-env env]) ([p params])
-            (dict-set new-env (car p) (car p))))
+            (dict-set new-env p p)))
         (Lambda params rty ((uniquify-exp new-env) body))]
        [(HasType e t) (HasType ((uniquify-exp env) e) t)]
        [(Apply f args) (Apply ((uniquify-exp env) f) (map (uniquify-exp env) args))]
@@ -109,7 +149,7 @@
          [(Def name params rty info body)
           (define new-env
             (for/fold ([new-env env]) ([p params])
-              (dict-set new-env (car p) (car p))))
+              (dict-set new-env p p)))
           (Def name params rty info ((uniquify-exp new-env) body))])))])
 
 (define/match (reveal-functions p)
@@ -131,6 +171,134 @@
        (match def
          [(Def name params rty info body)
           (Def name params rty info (reveal-functions-exp body))])))])
+
+(define/match (insert-casts p)
+  [((ProgramDefs info defs))
+   
+   (define insert-casts-exp
+     (induct-L
+       (match-lambda
+         [(Int i) (Inject (Int i) 'Integer)]
+         [(Bool b) (Inject (Bool b) 'Boolean)]
+         [(FunRef f n) (Inject (FunRef f n) `(,@(for/list ([_ (in-range n)]) 'Any) -> Any))]
+         [(and exp (or (SetBang _ _) (Void)))
+          (Inject exp 'Void)]
+         [(Lambda `(,ps ...) _ body)
+          (Inject (Lambda (for/list ([p ps]) `(,p : Any)) 'Any body)
+                  `(,@(for/list ([_ ps]) 'Any) -> Any))]
+         [(Prim 'read '()) (Inject (Prim 'read '()) 'Integer)]
+         [(Prim (and op (or '+ '-)) args)
+          (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Integer)]
+         [(Prim (and op (or '< '<= '> '>=)) args)
+          (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Boolean)]
+         [(Prim 'eq? args)
+          (Inject (Prim 'eq? args) 'Boolean)]
+         [(Prim (and op (or 'and 'or)) args)
+          (Inject (Prim op (for/list ([a args]) (Project a 'Boolean))) 'Boolean)]
+         [(Prim 'vector-ref (list v i))
+          (Prim 'any-vector-ref (list v (Project i 'Integer)))]
+         [(Prim 'vector-set! (list v i e))
+          (Prim 'any-vector-set! (list v (Project i 'Integer) e))]
+         [(Prim 'vector args)
+          (Inject (Prim 'vector args) `(Vector ,@(for/list ([_ args]) 'Any)))]
+         [(Prim 'vector-length args)
+          (Inject (Prim 'any-vector-length args) 'Integer)]
+         [(Apply f args)
+          (Apply (Project f `(,@(for/list ([_ args]) 'Any) -> Any)) args)]
+         [(If c t e)
+          (If (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))
+              e
+              t)]
+         [(Prim 'not (list a))
+          (If (Prim 'eq? (list a (Inject (Bool #f) 'Boolean)))
+            (Inject (Bool #t) 'Boolean)
+            (Inject (Bool #f) 'Boolean))]
+         [(WhileLoop c e)
+          (Inject
+            (WhileLoop
+              (Prim 'not (list (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))))
+              e)
+            'Void)]
+         [(Prim (and op (or 'boolean? 'integer? 'vector? 'procedure? 'void?)) args)
+          (Inject (Prim op args) 'Boolean)]
+         [exp exp])))
+   
+   (define/match (insert-casts-Def def)
+     [((Def name params _ info body))
+      (Def
+        name
+        (for/list ([p params]) `(,p : Any))
+        (if (eq? name 'main) 'Integer 'Any)
+        info
+        (if (eq? name 'main)
+          (Project (insert-casts-exp body) 'Integer)
+          (insert-casts-exp body)))])
+   
+   (ProgramDefs info (map insert-casts-Def defs))])
+  
+(define/match (reveal-casts p)
+  [((ProgramDefs info defs))
+   
+   (define type-pred->type-tag
+     (hash
+       'boolean? (type-tag 'Boolean)
+       'integer? (type-tag 'Integer)
+       'vector? (type-tag '(Vector))
+       'procedure? (type-tag '(-> _))
+       'void? (type-tag 'Void)))
+   
+   (define reveal-casts-exp
+     (induct-L
+       (match-lambda
+         [(Project e ty)
+          (define tmp-var (gensym 'project.))
+          (Let tmp-var e
+            (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var tmp-var)))
+                                 (Int (type-tag ty))))
+              (ValueOf (Var tmp-var) ty)
+              (Exit)))]
+         [(Inject e ty)
+          (Prim 'make-any (list e (Int (type-tag ty))))]
+         [(Prim op (list e)) #:when (dict-has-key? type-pred->type-tag op)
+          (Prim 'eq? (list (Prim 'tag-of-any (list e)) (Int (dict-ref type-pred->type-tag op))))]
+         [(Prim 'any-vector-ref (list v i))
+          (define v-var (gensym 'any-vector-ref.vector.))
+          (define i-var (gensym 'any-vector-ref.index.))
+          (Let v-var v
+            (Let i-var i
+              (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                   (Int (type-tag '(Vector)))))
+                (If (Prim '< (list (Var i-var)
+                                   (Prim 'any-vector-length (list (Var v-var)))))
+                  (Prim 'any-vector-ref (list (Var v-var) (Var i-var)))
+                  (Exit))
+                (Exit))))]
+         [(Prim 'any-vector-length (list v))
+          (define v-var (gensym 'any-vector-length.vector.))
+          (Let v-var v
+            (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                 (Int (type-tag '(Vector)))))
+              (Prim 'any-vector-length (list (Var v-var)))
+              (Exit)))]
+         [(Prim 'any-vector-set! (list v i e))
+          (define v-var (gensym 'any-vector-set!.vector.))
+          (define i-var (gensym 'any-vector-set!.index.))
+          (Let v-var v
+            (Let i-var i
+              (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                   (Int (type-tag '(Vector)))))
+                (If (Prim '< (list (Var i-var)
+                                   (Prim 'any-vector-length (list (Var v-var)))))
+                  (Prim 'any-vector-set! (list (Var v-var) (Var i-var) e))
+                  (Exit))
+                (Exit))))]
+         [exp exp])))
+   
+   (define/match (reveal-casts-Def def)
+     [((Def name params rty info body))
+      (Def name params rty info (reveal-casts-exp body))])
+   
+   (ProgramDefs info (map reveal-casts-Def defs))])
 
 (define/match (collect-set! exp)
   [((SetBang x e)) (set-union (set x) (collect-set! e))]
@@ -238,6 +406,8 @@
    (define convert-exp
      (induct-L
        (match-lambda
+         [(ValueOf e `(,arg-tys ... -> ,rty))
+          (ValueOf e `(Vector ((Vector _) ,@arg-tys -> ,rty)))]
          [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
          [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
          [(Apply f args)
@@ -246,7 +416,7 @@
             (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
          [exp exp])))
    
-   (define/match (convert-def def)
+   (define/match (convert-Def def)
      [((Def name params rty info body))
       (define new-params
         (if (eq? name 'main)
@@ -256,7 +426,7 @@
           (convert-params (gensym 'closure.) '(Vector _) params)))
       (Def name new-params (convert-type rty) info (convert-exp body))])
    
-   (ProgramDefs info (append (map convert-def defs) lifted-defs))])
+   (ProgramDefs info (append (map convert-Def defs) lifted-defs))])
   
 (define/match (limit-functions p)
   [((ProgramDefs info defs))
@@ -395,6 +565,10 @@
                 (values (append bindings bs) (append atoms (list a))))))
           (for/foldr ([exp (Apply (car atoms) (cdr atoms))]) ([binding bindings])
             (Let (car binding) (cdr binding) exp))]
+         [(ValueOf e t)
+          (define-values (binding atom) (rco-atom e))
+          (for/foldr ([exp (ValueOf atom t)]) ([b binding])
+            (Let (car b) (cdr b) exp))]
          [e e])))
    
    (define/match (exp->symbol e)
@@ -408,14 +582,16 @@
      [((Allocate _ _)) (gensym 'allocate.)]
      [((GlobalValue x)) (gensym (append-point x))]
      [((FunRef _ _)) (gensym 'fun-ref.)]
-     [((AllocateClosure _ _ _)) (gensym 'allocate-closure.)])
+     [((AllocateClosure _ _ _)) (gensym 'allocate-closure.)]
+     [((ValueOf _ _)) (gensym 'value-of.)]
+     [((Exit)) (gensym 'exit.)])
    
    (define/match (rco-atom e)
      [((GetBang x))
       (let ([xx (gensym (append-point x))])
         (values (list (cons xx (Var x))) (Var xx)))]
      [((or (Begin _ _) (If _ _ _) (Let _ _ _) (Prim _ _) (Collect _) (WhileLoop _ _) (SetBang _ _)
-           (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)))
+           (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (ValueOf _ _) (Exit)))
       (let ([x (exp->symbol e)])
         (values (list (cons x (rco-exp e))) (Var x)))]
      [(_) (values '() e)])
@@ -447,6 +623,8 @@
       (define (explicate-effects effs cont)
         (match effs
           ['() cont]
+          [(cons (Exit) effs)
+           (Exit)]
           [(cons (Apply f args) effs)
            (define x (gensym 'not.used.))
            (explicate-assign x (Apply f args) (explicate-effects effs cont))]
@@ -463,6 +641,8 @@
            (Seq (Prim 'read '()) (explicate-effects effs cont))]
           [(cons (Prim 'vector-set! args) effs)
            (Seq (Prim 'vector-set! args) (explicate-effects effs cont))]
+          [(cons (Prim 'any-vector-set! args) effs)
+           (explicate-assign (gensym 'not.used.) (Prim 'any-vector-set! args) (explicate-effects effs cont))]
           [(cons (Collect n) effs)
            (Seq (Collect n) (explicate-effects effs cont))]
           [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _) (AllocateClosure _ _ _)) effs)
@@ -475,6 +655,7 @@
       
       (define (explicate-if c t e)
         (match c
+          [(Exit) (Exit)]
           [(Apply f args)
            (define cond-var (gensym 'if.cond.))
            (explicate-assign cond-var (Call f args) (explicate-if (Var cond-var) t e))]
@@ -501,6 +682,7 @@
       
       (define (explicate-assign x e cont)
         (match e
+          [(Exit) (Exit)]
           [(Apply f args) (Seq (Assign (Var x) (Call f args)) cont)]
           [(or (Collect _) (SetBang _ _) (WhileLoop _ _))
            (explicate-effects (list e) (explicate-assign x (Void) cont))]
@@ -513,6 +695,7 @@
           [_ (Seq (Assign (Var x) e) cont)]))
       
       (define/match (explicate-tail e)
+        [((Exit)) (Exit)]
         [((Apply f args)) (TailCall f args)]
         [((or (Collect _) (SetBang _ _) (WhileLoop _ _)))
          (explicate-effects (list e) (Return (Void)))]
@@ -541,7 +724,7 @@
         (define pointer-mask
           (for/fold ([mask 0]) ([i (in-naturals)] [t elem-types])
             (bitwise-ior mask
-              (if (Vector? t)
+              (if (gc-type? t)
                 (arithmetic-shift 1 (+ 7 i))
                 0))))
         (define vector-length (arithmetic-shift (length elem-types) 1))
@@ -565,6 +748,54 @@
         [((GlobalValue x)) (Global x)])
       
       (define/match (si-stmt s)
+        [((Assign x (Prim 'make-any (list e (Int tag))))) #:when (= 2 (bitwise-and tag 2))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [((Assign x (Prim 'make-any (list e (Int tag))))) #:when (= 0 (bitwise-and tag 2))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'salq (list (Imm 3) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [((Assign x (Prim 'tag-of-any (list e))))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'andq (list (Imm 7) x)))]
+        [((Assign x (ValueOf e t))) #:when (pair? t)
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'andq (list (Imm -8) x)))]
+        [((Assign x (ValueOf e t))) #:when (symbol? t)
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'sarq (list (Imm 3) x)))]
+        [((Assign x (Prim 'any-vector-length (list v))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'r11)))
+           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 0) (Reg 'r11)))
+           (Instr 'sarq (list (Imm 1) (Reg 'r11)))
+           (Instr 'andq (list (Imm 63) (Reg 'r11)))
+           (Instr 'movq (list (Reg 'r11) x)))]
+        [((Assign x (Prim 'any-vector-ref (list v i))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'r11)))
+           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (si-atom i) (Reg 'rax)))
+           (Instr 'addq (list (Imm 1) (Reg 'rax)))
+           (Instr 'imulq (list (Imm 8) (Reg 'rax)))
+           (Instr 'addq (list (Reg 'rax) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 0) x)))]
+        [((Assign x (Prim 'any-vector-set! (list v i e))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'r11)))
+           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (si-atom i) (Reg 'rax)))
+           (Instr 'addq (list (Imm 1) (Reg 'rax)))
+           (Instr 'imulq (list (Imm 8) (Reg 'rax)))
+           (Instr 'addq (list (Reg 'rax) (Reg 'r11)))
+           (Instr 'movq (list (si-atom e) (Reg 'r11)))
+           (Instr 'movq (list (Imm (type-tag 'Void)) x)))]
         [((Assign x (FunRef name _)))
          (list
            (Instr 'leaq (list (Global name) x)))]
@@ -648,6 +879,10 @@
         [((Prim 'read '())) (list (Callq 'read_int 0))])
       
       (define/match (si-tail tail)
+        [((Exit))
+         (list
+           (Instr 'movq (list (Imm 255) (car argument-passing-registers)))
+           (Callq 'exit 1))]
         [((TailCall f args))
          (append
            (for/list ([a args] [r argument-passing-registers])
@@ -685,7 +920,7 @@
 
 (define (locations-written instr)
   (set-filter location? (match instr
-    [(Instr (or 'addq 'subq 'xorq 'movq 'movzbq 'andq 'sarq 'leaq) (list _ b)) (set b)]
+    [(Instr (or 'addq 'subq 'imulq 'xorq 'movq 'movzbq 'andq 'orq 'sarq 'salq 'leaq) (list _ b)) (set b)]
     [(Instr (or 'negq 'pushq 'popq) (list a)) (set a)]
     [(Instr 'set (list _ a)) (set (enlarge-reg a))]
     [(Instr 'cmpq _) (set)]
@@ -695,7 +930,7 @@
     [(or (Jmp _) (JmpIf _ _) (TailJmp _ _)) (set)]
     [_ (error 'locations-written "unhandled case: ~a" (Instr-name instr))])))
 
-(define/match (enlarge-reg arg)
+(define/match (enlarge-reg reg)
   [((ByteReg (or 'ah 'al))) (Reg 'rax)]
   [((ByteReg (or 'bh 'bl))) (Reg 'rbx)]
   [((ByteReg (or 'ch 'cl))) (Reg 'rcx)]
@@ -713,7 +948,7 @@
       
       (define (locations-read instr)
         (set-filter location? (match instr
-          [(Instr (or 'addq 'subq 'xorq 'cmpq 'negq 'andq 'sarq) args) (list->set args)]
+          [(Instr (or 'addq 'subq 'imulq 'xorq 'cmpq 'negq 'andq 'orq 'sarq 'salq) args) (list->set args)]
           [(Instr (or 'movq 'leaq) (list a _)) (set a)]
           [(Instr 'movzbq (list a _)) (set (enlarge-reg a))]
           [(Instr (or 'pushq 'popq 'set) _) (set)]
@@ -780,7 +1015,7 @@
 
 (define/match (build-interference p)
   [((ProgramDefs info defs))
- 
+   
    (define/match (build-interference-Def p)
      [((Def name '() 'Integer info blocks))
       
@@ -809,7 +1044,7 @@
                  (add-edge! gr v d)))])
           (when (or (Callq? instr) (IndirectCallq? instr))
             (define locals-types (dict-ref info 'locals-types))
-            (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (Vector? (dict-ref locals-types (Var-name v)))))
+            (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (gc-type? (dict-ref locals-types (Var-name v)))))
               (for ([r callee-saved-registers])
                 (add-edge! gr v r))))))
       
@@ -884,7 +1119,7 @@
                       (for/fold ([reg-variables '()] [stack-variables '()] [root-variables '()])
                                 ([(location color) (in-dict location->color)])
                         (if (>= color num-regs)
-                          (if (Vector? (dict-ref locals-types (Var-name location)))
+                          (if (gc-type? (dict-ref locals-types (Var-name location)))
                             (values reg-variables stack-variables (cons (cons location color) root-variables))
                             (values reg-variables (cons (cons location color) stack-variables) root-variables))
                           (values (cons (cons location color) reg-variables) stack-variables root-variables)))])
@@ -1044,23 +1279,26 @@
   
 (define (annotate-var-type e)
   (parameterize ([typed-vars #t])
-    (type-check-Llambda e)))
+    (type-check-Lany e)))
   
 (define compiler-passes
-  `(("shrink" ,shrink ,interp-Llambda ,type-check-Llambda)
-    ("uniquify" ,uniquify ,interp-Llambda ,type-check-Llambda)
-    ("reveal FunRef" ,reveal-functions ,interp-Llambda-prime ,type-check-Llambda)
-    ("convert assignments" ,convert-assignments ,interp-Llambda-prime ,type-check-Llambda)
-    ("annotate var types" ,(lambda (x) x) ,interp-Llambda-prime ,annotate-var-type)
-    ("convert closures" ,convert-closures ,interp-Llambda-prime ,type-check-Llambda)
-    ("limit funtion parameters" ,limit-functions ,interp-Llambda-prime ,type-check-Llambda)
-    ("expose allocation" ,expose-allocation ,interp-Llambda-prime ,type-check-Llambda)
-    ("uncover get!" ,uncover-get! ,interp-Llambda-prime ,type-check-Llambda)
-    ("remove complex operands" ,remove-complex-operands ,interp-Llambda-prime ,type-check-Llambda)
-    ("explicate control" ,explicate-control ,interp-Clambda ,type-check-Clambda)
+  `(("shrink" ,shrink ,interp-Ldyn-prog)
+    ("uniquify" ,uniquify ,interp-Ldyn-prog)
+    ("reveal FunRef" ,reveal-functions ,interp-Ldyn-prog)
+    ("insert casts" ,insert-casts ,interp-Lany-prime ,type-check-Lany)
+    ("reveal casts" ,reveal-casts ,interp-Lany-prime ,type-check-Lany)
+    ("convert assignments" ,convert-assignments ,interp-Lany-prime ,type-check-Lany)
+    ("annotate var types" ,(lambda (x) x) ,interp-Lany-prime ,annotate-var-type)
+    ("convert closures" ,convert-closures ,interp-Lany-prime ,type-check-Lany)
+    ("limit funtion parameters" ,limit-functions ,interp-Lany-prime ,type-check-Lany)
+    ("expose allocation" ,expose-allocation ,interp-Lany-prime ,type-check-Lany)
+    ("uncover get!" ,uncover-get! ,interp-Lany-prime ,type-check-Lany)
+    ("remove complex operands" ,remove-complex-operands ,interp-Lany-prime ,type-check-Lany)
+    ("explicate control" ,explicate-control ,interp-Cany ,type-check-Cany)
     ("instruction selection" ,select-instructions ,interp-x86-4)
     ("liveness analysis" ,uncover-live ,interp-x86-4)
     ("build interference graph" ,build-interference ,interp-x86-4)
     ("allocate registers" ,allocate-registers ,interp-x86-4)
     ("patch instructions" ,patch-instructions ,interp-x86-4)
-    ("prelude and conclusion" ,prelude-and-conclusion #f)))
+    ("prelude and conclusion" ,prelude-and-conclusion #f)
+    ))

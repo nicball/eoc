@@ -148,7 +148,24 @@ Changelog:
          (struct-out CFunction)
          (struct-out X86Function)
          
+         (struct-out Exit)
+         
          )
+
+(struct Exit () #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'Exit)
+                 (lambda (obj) (list)))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (match ast
+                  [(Exit)
+                   (write-string "(exit)" port)])]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]
+               ))))])
 
 ;; debug state is a nonnegative integer.
 ;; The easiest way to increment it is passing the -d option
@@ -1502,6 +1519,7 @@ Changelog:
 
 (define (exp? e)
   (match e
+    [(Exit) #t]
     [(Var x) #t]
     [(Int n) #t]
     [(Bool b) #t]

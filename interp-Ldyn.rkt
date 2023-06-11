@@ -68,8 +68,24 @@
   (define recur (interp-Ldyn-exp env))
   (define result
     (match ast
-      [(Var x) (lookup x env)]
-      [(FunRef f n) (lookup f env)]
+      [(SetBang x e)
+       (let ([b (lookup x env)])
+         (set-box! b (recur e))
+         (Tagged (void) 'Void))]
+      [(Begin effs e)
+       (for ([exp effs]) (recur exp))
+       (recur e)]       
+      [(WhileLoop c e)
+       (define (truthy? v)
+         (match (Tagged-value v)
+           [#f #f]
+           [_ #t]))
+       (while (truthy? (recur c))
+         (recur e))
+       (Tagged (void) 'Void)]
+      [(Void) (Tagged-value (void) 'Void)]
+      [(Var x) (unbox (lookup x env))]
+      [(FunRef f n) (unbox (lookup f env))]
       [(Int n) (Tagged n 'Integer)]
       [(Bool b) (Tagged b 'Boolean)]
       [(Lambda xs rt body)
@@ -90,7 +106,7 @@
        (vector-set! (Tagged-value vec) (Tagged-value i) arg)
        (Tagged (void) 'Void)]
       [(Let x e body)
-       ((interp-Ldyn-exp (cons (cons x (recur e)) env)) body)]
+       ((interp-Ldyn-exp (cons (cons x (box (recur e))) env)) body)]
       [(Prim 'and (list e1 e2)) (recur (If e1 e2 (Bool #f)))]
       [(Prim 'or (list e1 e2))
        (define v1 (recur e1))
@@ -123,7 +139,7 @@
           (unless (eq? (length xs) (length args))
             (error 'trapped-error "number of arguments ~a != arity ~a\nin ~v"
                    (length args) (length xs) ast))
-          (define new-env (append (map cons xs args) lam-env))
+          (define new-env (append (map (lambda (x e) (cons x (box e))) xs args) lam-env))
           ((interp-Ldyn-exp new-env) body)]
          [else (error "interp-Ldyn-exp, expected function, not" f-val)])]))
   (verbose 'interp-Ldyn ast result)
@@ -131,7 +147,7 @@
 
 (define (interp-Ldyn-def ast)
   (match ast
-    [(Def f xs rt info body) (mcons f (Function xs body '()))]))
+    [(Def f xs rt info body) (cons f (box (Function xs body '())))]))
 
 ;; This version is for source code in Ldyn.
 (define (interp-Ldyn ast)
@@ -139,7 +155,7 @@
     [(ProgramDefsExp info ds body)
      (define top-level (map (lambda (d) (interp-Ldyn-def d)) ds))
      (for/list ([b top-level])
-       (set-mcdr! b (match (mcdr b)
+       (set-box! (cdr b) (match (unbox (cdr b))
                       [(Function xs body '())
                        (Tagged (Function xs body top-level) 'Procedure)])))
      (define result ((interp-Ldyn-exp top-level) body))
@@ -153,7 +169,7 @@
     [(ProgramDefs info ds)
      (define top-level (map (lambda (d) (interp-Ldyn-def d)) ds))
      (for/list ([b top-level])
-       (set-mcdr! b (match (mcdr b)
+       (set-box! (cdr b) (match (unbox (cdr b))
                       [(Function xs body '())
                        (Tagged (Function xs body top-level) 'Procedure)])))
      (define result ((interp-Ldyn-exp top-level) (Apply (Var 'main) '())))
