@@ -1596,6 +1596,7 @@ Changelog:
     [(Prim 'vectorof-set! es) #t]
     [(Prim 'any-vector-set! es) #t]
     [(Prim 'any-vectorof-set! es) #t]
+    [(Prim 'proxy-vector-set! es) #t]
     [(Prim 'read '()) #t]
     [(Prim 'exit '()) #t]
     [(Call f arg) #t]

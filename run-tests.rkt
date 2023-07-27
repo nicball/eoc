@@ -28,9 +28,10 @@
 (interp-tests "while" type-check-Llambda compiler-passes interp-Llambda "while_test" (tests-for "while"))
 (interp-tests "vec" type-check-Llambda compiler-passes interp-Llambda "vectors_test" (tests-for "vectors"))
 (interp-tests "fun" type-check-Llambda compiler-passes interp-Llambda "functions_test" (tests-for "functions"))
-;(debug-level 1)
-;(AST-output-syntax 'abstract-syntax)
 (interp-tests "lambda" type-check-Llambda compiler-passes interp-Llambda "lambda_test" (tests-for "lambda"))
+(debug-level 1)
+;(AST-output-syntax 'abstract-syntax)
+(interp-tests "fun" type-check-Llambda compiler-passes interp-Llambda "functions_test" (tests-for "functions"))
 
 ;; Uncomment the following when all the passes are complete to
 ;; test the final x86 code.

@@ -55,7 +55,7 @@
   [((or (Inject e _) (Project e _) (ValueOf e _))) (list e)]
   [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _)
         (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (Exit)))
-    '()]
+   '()]
   [((Apply e es)) (cons e es)]
   [((SetBang _ e)) (list e)]
   [((Begin effs e)) (append effs (list e))]
@@ -255,7 +255,20 @@
           (Let tmp-var e
             (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var tmp-var)))
                                  (Int (type-tag ty))))
-              (ValueOf (Var tmp-var) ty)
+              (match ty
+                [`(Vector ,ts ...)
+                 (define vec-var (gensym 'vector.))
+                 (Let vec-var (ValueOf (Var tmp-var) ty)
+                   (If (Prim 'eq? (list (Prim 'vector-length (list (Var vec-var))) (Int (length ts))))
+                     (Var vec-var)
+                     (Exit)))]
+                [`(,ts ... -> ,_)
+                 (define clos-var (gensym 'closure.))
+                 (Let clos-var (ValueOf (Var tmp-var) ty)
+                   (If (Prim 'eq? (list (Prim 'procedure-arity (list (Var clos-var))) (Int (length ts))))
+                     (Var clos-var)
+                     (Exit)))]
+                [_ (ValueOf (Var tmp-var) ty)])
               (Exit)))]
          [(Inject e ty)
           (Prim 'make-any (list e (Int (type-tag ty))))]
@@ -705,9 +718,10 @@
         [((Let x e body)) (explicate-assign x e (explicate-tail body))]
         [(_) (Return e)])
       
-      (Def name params rty info (let ([start (explicate-tail body)])
-        (dict-set! blocks (symbol-append name 'start) start)
-        (make-immutable-hash (hash->list blocks))))])
+      (Def name params rty info
+        (let ([start (explicate-tail body)])
+         (dict-set! blocks (symbol-append name 'start) start)
+         (make-immutable-hash (hash->list blocks))))])
    
    (ProgramDefs info (map explicate-control-Def defs))])
 
@@ -735,7 +749,7 @@
          (define arity (length arg-tys))
          (define elem-types (drop closure-type 1))
          (bitwise-ior (vector-tag elem-types)
-           (arithmetic-shift 58 arity))])
+           (arithmetic-shift arity 58))])
       
       (define cmp->cc
         '((eq? . e) (< . l) (<= . le) (> . g) (>= . ge)))
@@ -763,24 +777,24 @@
            (Instr 'andq (list (Imm 7) x)))]
         [((Assign x (ValueOf e t))) #:when (pair? t)
          (list
-           (Instr 'movq (list (si-atom e) x))
-           (Instr 'andq (list (Imm -8) x)))]
+           (Instr 'movq (list (Imm -8) x))
+           (Instr 'andq (list (si-atom e) x)))]
         [((Assign x (ValueOf e t))) #:when (symbol? t)
          (list
            (Instr 'movq (list (si-atom e) x))
            (Instr 'sarq (list (Imm 3) x)))]
         [((Assign x (Prim 'any-vector-length (list v))))
          (list
-           (Instr 'movq (list (si-atom v) (Reg 'r11)))
-           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (si-atom v) (Reg 'r11)))
            (Instr 'movq (list (Deref 'r11 0) (Reg 'r11)))
            (Instr 'sarq (list (Imm 1) (Reg 'r11)))
            (Instr 'andq (list (Imm 63) (Reg 'r11)))
            (Instr 'movq (list (Reg 'r11) x)))]
         [((Assign x (Prim 'any-vector-ref (list v i))))
          (list
-           (Instr 'movq (list (si-atom v) (Reg 'r11)))
-           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (si-atom v) (Reg 'r11)))
            (Instr 'movq (list (si-atom i) (Reg 'rax)))
            (Instr 'addq (list (Imm 1) (Reg 'rax)))
            (Instr 'imulq (list (Imm 8) (Reg 'rax)))
@@ -788,8 +802,8 @@
            (Instr 'movq (list (Deref 'r11 0) x)))]
         [((Assign x (Prim 'any-vector-set! (list v i e))))
          (list
-           (Instr 'movq (list (si-atom v) (Reg 'r11)))
-           (Instr 'andq (list (Imm -8) (Reg 'r11)))
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (si-atom v) (Reg 'r11)))
            (Instr 'movq (list (si-atom i) (Reg 'rax)))
            (Instr 'addq (list (Imm 1) (Reg 'rax)))
            (Instr 'imulq (list (Imm 8) (Reg 'rax)))
@@ -904,11 +918,13 @@
       
       (Def name '() 'Integer
         (dict-set* info 'num-root-spills 0 'num-params (length params))
-        (hash-map/copy blocks (lambda (label block)
-          (values label (Block '()
-            (if (eq? label (symbol-append name 'start))
-              (append copy-arguments (si-tail block))
-              (si-tail block)))))))])
+        (hash-map/copy blocks
+          (lambda (label block)
+            (values label
+              (Block '()
+                (if (eq? label (symbol-append name 'start))
+                  (append copy-arguments (si-tail block))
+                  (si-tail block)))))))])
    
    (ProgramDefs info (map select-instructions-Def defs))])
 
@@ -919,16 +935,17 @@
 (define caller-saved-registers (map Reg '(rax rcx rdx rsi rdi r8 r9 r10 r11)))
 
 (define (locations-written instr)
-  (set-filter location? (match instr
-    [(Instr (or 'addq 'subq 'imulq 'xorq 'movq 'movzbq 'andq 'orq 'sarq 'salq 'leaq) (list _ b)) (set b)]
-    [(Instr (or 'negq 'pushq 'popq) (list a)) (set a)]
-    [(Instr 'set (list _ a)) (set (enlarge-reg a))]
-    [(Instr 'cmpq _) (set)]
-    [(Callq _ arity) (list->set caller-saved-registers)]
-    [(IndirectCallq _ arity) (list->set caller-saved-registers)]
-    [(Retq) (set (Reg 'rax))]
-    [(or (Jmp _) (JmpIf _ _) (TailJmp _ _)) (set)]
-    [_ (error 'locations-written "unhandled case: ~a" (Instr-name instr))])))
+  (set-filter location?
+    (match instr
+      [(Instr (or 'addq 'subq 'imulq 'xorq 'movq 'movzbq 'andq 'orq 'sarq 'salq 'leaq) (list _ b)) (set b)]
+      [(Instr (or 'negq 'pushq 'popq) (list a)) (set a)]
+      [(Instr 'set (list _ a)) (set (enlarge-reg a))]
+      [(Instr 'cmpq _) (set)]
+      [(Callq _ arity) (list->set caller-saved-registers)]
+      [(IndirectCallq _ arity) (list->set caller-saved-registers)]
+      [(Retq) (set (Reg 'rax))]
+      [(or (Jmp _) (JmpIf _ _) (TailJmp _ _)) (set)]
+      [_ (error 'locations-written "unhandled case: ~a" (Instr-name instr))])))
 
 (define/match (enlarge-reg reg)
   [((ByteReg (or 'ah 'al))) (Reg 'rax)]
@@ -947,16 +964,17 @@
         (list->set (take argument-passing-registers (min n 6))))
       
       (define (locations-read instr)
-        (set-filter location? (match instr
-          [(Instr (or 'addq 'subq 'imulq 'xorq 'cmpq 'negq 'andq 'orq 'sarq 'salq) args) (list->set args)]
-          [(Instr (or 'movq 'leaq) (list a _)) (set a)]
-          [(Instr 'movzbq (list a _)) (set (enlarge-reg a))]
-          [(Instr (or 'pushq 'popq 'set) _) (set)]
-          [(Callq _ arity) (arity-to-regs arity)]
-          [(IndirectCallq f arity) (set-add (arity-to-regs arity) f)]
-          [(TailJmp f arity) (set-add (arity-to-regs arity) f)]
-          [(Retq) (set (Reg 'rax))]
-          [_ (error 'locations-read "unhandled case: ~a" (Instr-name instr))])))
+        (set-filter location?
+          (match instr
+            [(Instr (or 'addq 'subq 'imulq 'xorq 'cmpq 'negq 'andq 'orq 'sarq 'salq) args) (list->set args)]
+            [(Instr (or 'movq 'leaq) (list a _)) (set a)]
+            [(Instr 'movzbq (list a _)) (set (enlarge-reg a))]
+            [(Instr (or 'pushq 'popq 'set) _) (set)]
+            [(Callq _ arity) (arity-to-regs arity)]
+            [(IndirectCallq f arity) (set-add (arity-to-regs arity) f)]
+            [(TailJmp f arity) (set-add (arity-to-regs arity) f)]
+            [(Retq) (set (Reg 'rax))]
+            [_ (error 'locations-read "unhandled case: ~a" (Instr-name instr))])))
       
       (define (step live-after instr)
         (match instr
@@ -976,15 +994,15 @@
       
       (define cfg
         (let ([gr (make-multigraph '())])
-         (for ([(curr-label block) (in-dict blocks)])
-           (add-vertex! gr curr-label)
-           (for ([instr (Block-instr* block)])
-             (match instr
-               [(or (Jmp label) (JmpIf _ label)) #:when (dict-has-key? blocks label)
-                (add-vertex! gr label)
-                (add-directed-edge! gr label curr-label)]
-               [_ '()])))
-          gr))
+          (for ([(curr-label block) (in-dict blocks)])
+            (add-vertex! gr curr-label)
+            (for ([instr (Block-instr* block)])
+              (match instr
+                [(or (Jmp label) (JmpIf _ label)) #:when (dict-has-key? blocks label)
+                 (add-vertex! gr label)
+                 (add-directed-edge! gr label curr-label)]
+                [_ '()])))
+         gr))
       
       (define (analyse-dataflow cfg transfer bottom join)
         (define label->live-before (make-hash))
@@ -999,17 +1017,18 @@
             (for/fold ([state bottom]) ([pred (in-neighbors cfg-t curr-node)])
               (join state (dict-ref label->live-before pred))))
           (define output (transfer curr-node input))
-          (cond [(not (equal? output (dict-ref label->live-before curr-node)))
+          (when (not (equal? output (dict-ref label->live-before curr-node)))
             (dict-set! label->live-before curr-node output)
             (for ([succ (in-vertices cfg)])
-              (enqueue! work-list succ))]))
+              (enqueue! work-list succ))))
         label->live-before)
       
       (analyse-dataflow cfg transfer (set) set-union) 
       
       (Def name '() 'Integer info
-        (hash-map/copy blocks (lambda (label block)
-          (values label (Block (dict-set (Block-info block) 'live-afters (dict-ref label->live-afters label)) (Block-instr* block))))))])
+        (hash-map/copy blocks
+          (lambda (label block)
+            (values label (Block (dict-set (Block-info block) 'live-afters (dict-ref label->live-afters label)) (Block-instr* block))))))])
    
    (ProgramDefs info (map uncover-live-Def defs))])
 
@@ -1090,10 +1109,12 @@
       (define variable->handle (make-hash))
       
       (define (get-saturation v)
-        (list->set (concat (for/list ([u (in-neighbors interference v)])
-          (if (dict-has-key? location->color u)
-            (list (dict-ref location->color u))
-            '())))))
+        (list->set
+          (concat
+            (for/list ([u (in-neighbors interference v)])
+              (if (dict-has-key? location->color u)
+                (list (dict-ref location->color u))
+                '())))))
       
       (define (greedy-color forbids)
         (sequence-ref (sequence-filter (lambda (n) (not (set-member? forbids n))) (in-naturals 0)) 0))
@@ -1107,7 +1128,7 @@
                [c (greedy-color (Sat-forbids v))])
           (dict-set! location->color (Sat-location v) c)
           (for ([u (in-neighbors interference (Sat-location v))]
-                 #:when (Var? u))
+                #:when (Var? u))
             (let ([hdl (dict-ref variable->handle u)])
               (set-node-key! hdl (Sat u (get-saturation u)))
               (pqueue-decrease-key! queue hdl)))))
@@ -1152,8 +1173,9 @@
           'stack-variables-size stack-variables-size))
       
       (Def name '() 'Integer (apply dict-set* info new-info)
-        (hash-map/copy blocks (lambda (label block)
-          (values label (Block (Block-info block) (map transform-instr (Block-instr* block)))))))])
+        (hash-map/copy blocks
+          (lambda (label block)
+            (values label (Block (Block-info block) (map transform-instr (Block-instr* block)))))))])
    
    (ProgramDefs info (map allocate-registers-Def defs))])
 
@@ -1185,8 +1207,10 @@
         (Instr 'movq (list (Reg 'rax) b)))]
      [(_) (list instr)])
    
-   (Def name '() 'Integer info (hash-map/copy blocks (lambda (label block)
-     (values label (Block (Block-info block) (concat (map patch (Block-instr* block))))))))])
+   (Def name '() 'Integer info
+     (hash-map/copy blocks
+       (lambda (label block)
+         (values label (Block (Block-info block) (concat (map patch (Block-instr* block))))))))])
 
 (define/match (patch-instructions p)
   [((ProgramDefs info defs))
@@ -1300,5 +1324,5 @@
     ("build interference graph" ,build-interference ,interp-x86-4)
     ("allocate registers" ,allocate-registers ,interp-x86-4)
     ("patch instructions" ,patch-instructions ,interp-x86-4)
-    ("prelude and conclusion" ,prelude-and-conclusion #f)
-    ))
+    ("prelude and conclusion" ,prelude-and-conclusion #f)))
+    

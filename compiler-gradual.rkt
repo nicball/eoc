@@ -1,18 +1,18 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
-(require "interp-Llambda.rkt")
-(require "interp-Llambda-prime.rkt")
-(require "interp-Clambda.rkt")
+(require "interp-Lcast.rkt")
+(require "interp-Lcast-prime.rkt")
+(require "type-check-gradual.rkt")
 (require "type-check-Llambda.rkt")
-(require "type-check-Clambda.rkt")
+(require "interp-Cany-proxy.rkt")
 (require "utilities.rkt")
-(provide (all-defined-out))
 (require "interp.rkt")
 (require graph)
 (require "priority_queue.rkt")
 (require "multigraph.rkt")
 (require data/queue)
+(provide (all-defined-out))
 
 (define (concat lsts) (apply append lsts))
 
@@ -20,10 +20,9 @@
 
 (define (append-point sym) (symbol-append sym (string->symbol ".")))
 
-(define (Vector? type)
-  (match type
-    [(list 'Vector _ ...) #t]
-    [_ #f]))
+(define/match (gc-type? ty)
+  [((or 'Any `(Vector ,_ ...))) #t]
+  [(_) #f])
 
 (define (log fmt e) (printf fmt e) e)
 
@@ -33,8 +32,13 @@
 
 (define ((induct-L f) e)
   (match e
+    [(Inject e t) (f (Inject ((induct-L f) e) t))]
+    [(Project e t) (f (Project ((induct-L f) e) t))]
+    [(ValueOf e t) (f (ValueOf ((induct-L f) e) t))]
     [(Lambda params rty body) (f (Lambda params rty ((induct-L f) body)))]
-    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)) (f e)]
+    [(or (Int _) (Var _) (Bool _) (Void) (GetBang _) (Collect _)
+         (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (Exit))
+     (f e)]
     [(Prim op args) (f (Prim op (map (induct-L f) args)))]
     [(Let x e body) (f (Let x ((induct-L f) e) ((induct-L f) body)))]
     [(If c t e) (f (If ((induct-L f) c) ((induct-L f) t) ((induct-L f) e)))]
@@ -43,10 +47,14 @@
     [(WhileLoop c e) (f (WhileLoop ((induct-L f) c) ((induct-L f) e)))]
     [(HasType e t) (f (HasType ((induct-L f) e) t))]
     [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]
-    [(Closure arity exps) (f (Closure arity (map f exps)))]))
+    [(Closure arity exps) (f (Closure arity (map (induct-L f) exps)))]
+    [(Cast e s t) (f (Cast ((induct-L f) e) s t))]))
 
 (define/match (subexpressions exp)
-  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _) (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _))) '()]
+  [((or (Inject e _) (Project e _) (ValueOf e _))) (list e)]
+  [((or (Void) (Bool _) (Var _) (Int _) (GetBang _) (Collect _)
+        (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (Exit)))
+   '()]
   [((Apply e es)) (cons e es)]
   [((SetBang _ e)) (list e)]
   [((Begin effs e)) (append effs (list e))]
@@ -58,27 +66,178 @@
   [((HasType e _)) (list e)]
   [((Closure _ es)) es])
 
-(define/match (shrink p)
-  [((ProgramDefsExp info defs exp))
+(define/match (type-tag ty)
+  [('Integer) #b001]
+  [('Boolean) #b100]
+  [((or `(Vector ,_ ...) `(PVector ,_ ...))) #b010]
+  [(`(,_ ... -> ,_)) #b011]
+  [('Void) #b101])
+
+(define/match (add-main p)
+  [((Program info exp))
+   (add-main (ProgramDefsExp info '() exp))]
+  [((ProgramDefsExp info ds exp))
+   (ProgramDefs info (append ds
+                       (list (Def 'main '() 'Integer (hash) exp))))]
+  [((ProgramDefs _ _))
+   p])
+
+(define/match (lower-casts p)
+  [((ProgramDefs info defs))
    
+   (define (apply-cast exp source target)
+     (match* (source target)
+       [(_ _) #:when (equal? source target) exp]
+             
+       [('Any `(,arg-tys ... -> ,rty))
+        (define any->any `(,@(for/list ([_ arg-tys]) 'Any) -> Any))
+        (apply-cast
+          (Project exp any->any)
+          any->any
+          target)]
+       [('Any `(Vector ,elem-tys))
+        (define vector-any `(Vector ,@(for/list ([_ elem-tys]) 'Any)))
+        (apply-cast
+          (Project exp vector-any)
+          vector-any
+          target)]
+       [('Any _)
+        (Project exp target)]
+             
+       [(`(,arg-tys ... -> ,rty) 'Any)
+        (define any->any `(,@(for/list ([_ arg-tys]) 'Any) -> Any))
+        (Inject
+          (apply-cast exp source any->any)
+          'Any)]
+       [(`(Vector ,elem-tys) 'Any)
+        (define vector-any `(Vector ,@(for/list ([_ elem-tys]) 'Any)))
+        (Inject
+          (apply-cast exp vector-any target)
+          'Any)]
+       [(_ 'Any)
+        (Inject exp source)]
+             
+       [(`(Vector ,se-tys ...) `(Vector ,te-tys ...))
+        (define readers
+          (for/list ([src se-tys] [tgt te-tys])
+            (define arg (gensym 'reader-arg.))
+            (Lambda `((,arg : ,src)) tgt
+              (apply-cast (Var arg) src tgt))))
+        (define writers
+          (for/list ([src se-tys] [tgt te-tys])
+            (define arg (gensym 'writer-arg.))
+            (Lambda `((,arg : ,tgt)) src
+              (apply-cast (Var arg) tgt src))))
+        (Prim 'vector-proxy
+          (list exp (Prim 'raw-vector readers) (Prim 'raw-vector writers)))]
+   
+       [(`(,sa-tys ... -> ,srty) `(,ta-tys ... -> ,trty))
+        (define args (for/list ([_ ta-tys]) (gensym 'lambda-proxy-arg.)))
+        (Lambda
+          (for/list ([x args] [t ta-tys])
+            `(,x : ,t))
+          trty
+          (apply-cast
+            (Apply exp
+              (for/list ([x args] [s ta-tys] [t sa-tys])
+                (apply-cast (Var x) s t)))
+            srty
+            trty))]))
+       
+   (define lower-casts-exp
+     (induct-L
+       (match-lambda
+         [(Cast e s t) (apply-cast e s t)]
+         [exp exp])))
+   
+   (define/match (lower-casts-Def def)     
+     [((Def name params rty info body))
+      (Def name params rty info (lower-casts-exp body))])
+
+   (ProgramDefs info (map lower-casts-Def defs))])
+
+(define/match (differentiate-proxies p)
+  [((ProgramDefs info defs))
+   
+   (define/match (differentiate-proxies-type ty)
+     [(`(Vector ,tys ...)) `(PVector ,@(map differentiate-proxies-type tys))]
+     [(`(,arg-tys ... -> ,rty)) `(,@(map differentiate-proxies-type arg-tys) -> ,(differentiate-proxies-type rty))]
+     [(ty) ty])
+   
+   (define differentiate-proxies-exp
+     (induct-L
+       (match-lambda
+         [(HasType (Prim 'vector args) _)
+          (Prim 'inject-vector (list (Prim 'vector args)))]
+         [(Project e t) (Project e (differentiate-proxies-type t))]
+         [(Inject e t) (Inject e (differentiate-proxies-type t))]
+         [(Prim 'raw-vector args)
+          (Prim 'vector args)]
+         [(Prim 'vector-proxy args)
+          (Prim 'inject-proxy (list (Prim 'vector args)))]
+         [(Prim 'vector-ref (list v i))
+          (define pv (gensym 'pvector.))
+          (Let pv v
+            (If (Prim 'proxy? (list (Var pv)))
+              (Prim 'proxy-vector-ref (list (Var pv) i))
+              (Prim 'vector-ref (list (Prim 'project-vector (list (Var pv))) i))))]
+         [(Prim 'vector-set! (list v i e))
+          (define pv (gensym 'pvector.))
+          (Let pv v
+            (If (Prim 'proxy? (list (Var pv)))
+              (Prim 'proxy-vector-set! (list (Var pv) i e))
+              (Prim 'vector-set! (list (Prim 'project-vector (list (Var pv))) i e))))]
+         [(Prim 'vector-length (list v))
+          (define pv (gensym 'pvector.))
+          (Let pv v
+            (If (Prim 'proxy? (list (Var pv)))
+              (Prim 'proxy-vector-length (list (Var pv)))
+              (Prim 'vector-length (list (Prim 'project-vector (list (Var pv)))))))]
+         [(Lambda params rty body)
+          (Lambda
+            (for/list ([p params])
+              (match p
+                [`(,x : ,t) `(,x : ,(differentiate-proxies-type t))]))
+            (differentiate-proxies-type rty)
+            body)]
+         [exp exp])))
+   
+   (define/match (differentiate-proxies-Def def)     
+     [((Def name params rty info body))
+      (Def
+        name
+        (for/list ([p params])
+          (match p
+            [`(,x : ,t) `(,x : ,(differentiate-proxies-type t))]))
+        (differentiate-proxies-type rty)
+        info
+        (differentiate-proxies-exp body))])
+
+   (ProgramDefs info (map differentiate-proxies-Def defs))])
+
+(define/match (shrink p)
+  [((ProgramDefs info defs))
+
    (define shrink-exp
      (induct-L
        (match-lambda
          [(Prim 'and (list a b)) (If a b (Bool #f))]
          [(Prim 'or (list a b)) (If a (Bool #t) b)]
          [exp exp])))
-   
+
    (define/match (shrink-Def def)
      [((Def name params rty info body))
       (Def name params rty info (shrink-exp body))])
-   
-   (ProgramDefs info (append (map shrink-Def defs) (list (shrink-Def (Def 'main '() 'Integer (hash) exp)))))])
+
+   (ProgramDefs info (map shrink-Def defs))])
 
 (define/match (uniquify p)
   [((ProgramDefs info defs))
    
    (define (uniquify-exp env)
      (match-lambda
+       [(Project e t) (Project ((uniquify-exp env) e) t)]
+       [(Inject e t) (Inject ((uniquify-exp env) e) t)]
        [(Lambda params rty body)
         (define new-env
           (for/fold ([new-env env]) ([p params])
@@ -131,6 +290,83 @@
        (match def
          [(Def name params rty info body)
           (Def name params rty info (reveal-functions-exp body))])))])
+
+(define/match (reveal-casts p)
+  [((ProgramDefs info defs))
+   
+   (define type-pred->type-tag
+     (hash
+       'boolean? (type-tag 'Boolean)
+       'integer? (type-tag 'Integer)
+       'vector? (type-tag '(Vector))
+       'procedure? (type-tag '(-> _))
+       'void? (type-tag 'Void)))
+   
+   (define reveal-casts-exp
+     (induct-L
+       (match-lambda
+         [(Project e ty)
+          (define tmp-var (gensym 'project.))
+          (Let tmp-var e
+            (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var tmp-var)))
+                                 (Int (type-tag ty))))
+              (match ty
+                [`(Vector ,ts ...)
+                 (define vec-var (gensym 'vector.))
+                 (Let vec-var (ValueOf (Var tmp-var) ty)
+                   (If (Prim 'eq? (list (Prim 'vector-length (list (Var vec-var))) (Int (length ts))))
+                     (Var vec-var)
+                     (Exit)))]
+                [`(,ts ... -> ,_)
+                 (define clos-var (gensym 'closure.))
+                 (Let clos-var (ValueOf (Var tmp-var) ty)
+                   (If (Prim 'eq? (list (Prim 'procedure-arity (list (Var clos-var))) (Int (length ts))))
+                     (Var clos-var)
+                     (Exit)))]
+                [_ (ValueOf (Var tmp-var) ty)])
+              (Exit)))]
+         [(Inject e ty)
+          (Prim 'make-any (list e (Int (type-tag ty))))]
+         [(Prim op (list e)) #:when (dict-has-key? type-pred->type-tag op)
+          (Prim 'eq? (list (Prim 'tag-of-any (list e)) (Int (dict-ref type-pred->type-tag op))))]
+         [(Prim 'any-vector-ref (list v i))
+          (define v-var (gensym 'any-vector-ref.vector.))
+          (define i-var (gensym 'any-vector-ref.index.))
+          (Let v-var v
+            (Let i-var i
+              (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                   (Int (type-tag '(Vector)))))
+                (If (Prim '< (list (Var i-var)
+                                   (Prim 'any-vector-length (list (Var v-var)))))
+                  (Prim 'any-vector-ref (list (Var v-var) (Var i-var)))
+                  (Exit))
+                (Exit))))]
+         [(Prim 'any-vector-length (list v))
+          (define v-var (gensym 'any-vector-length.vector.))
+          (Let v-var v
+            (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                 (Int (type-tag '(Vector)))))
+              (Prim 'any-vector-length (list (Var v-var)))
+              (Exit)))]
+         [(Prim 'any-vector-set! (list v i e))
+          (define v-var (gensym 'any-vector-set!.vector.))
+          (define i-var (gensym 'any-vector-set!.index.))
+          (Let v-var v
+            (Let i-var i
+              (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                   (Int (type-tag '(Vector)))))
+                (If (Prim '< (list (Var i-var)
+                                   (Prim 'any-vector-length (list (Var v-var)))))
+                  (Prim 'any-vector-set! (list (Var v-var) (Var i-var) e))
+                  (Exit))
+                (Exit))))]
+         [exp exp])))
+   
+   (define/match (reveal-casts-Def def)
+     [((Def name params rty info body))
+      (Def name params rty info (reveal-casts-exp body))])
+   
+   (ProgramDefs info (map reveal-casts-Def defs))])
 
 (define/match (collect-set! exp)
   [((SetBang x e)) (set-union (set x) (collect-set! e))]
@@ -238,6 +474,8 @@
    (define convert-exp
      (induct-L
        (match-lambda
+         [(ValueOf e `(,arg-tys ... -> ,rty))
+          (ValueOf e `(Vector ((Vector _) ,@arg-tys -> ,rty)))]
          [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
          [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
          [(Apply f args)
@@ -246,7 +484,7 @@
             (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
          [exp exp])))
    
-   (define/match (convert-def def)
+   (define/match (convert-Def def)
      [((Def name params rty info body))
       (define new-params
         (if (eq? name 'main)
@@ -256,7 +494,7 @@
           (convert-params (gensym 'closure.) '(Vector _) params)))
       (Def name new-params (convert-type rty) info (convert-exp body))])
    
-   (ProgramDefs info (append (map convert-def defs) lifted-defs))])
+   (ProgramDefs info (append (map convert-Def defs) lifted-defs))])
   
 (define/match (limit-functions p)
   [((ProgramDefs info defs))
@@ -395,6 +633,10 @@
                 (values (append bindings bs) (append atoms (list a))))))
           (for/foldr ([exp (Apply (car atoms) (cdr atoms))]) ([binding bindings])
             (Let (car binding) (cdr binding) exp))]
+         [(ValueOf e t)
+          (define-values (binding atom) (rco-atom e))
+          (for/foldr ([exp (ValueOf atom t)]) ([b binding])
+            (Let (car b) (cdr b) exp))]
          [e e])))
    
    (define/match (exp->symbol e)
@@ -408,14 +650,16 @@
      [((Allocate _ _)) (gensym 'allocate.)]
      [((GlobalValue x)) (gensym (append-point x))]
      [((FunRef _ _)) (gensym 'fun-ref.)]
-     [((AllocateClosure _ _ _)) (gensym 'allocate-closure.)])
+     [((AllocateClosure _ _ _)) (gensym 'allocate-closure.)]
+     [((ValueOf _ _)) (gensym 'value-of.)]
+     [((Exit)) (gensym 'exit.)])
    
    (define/match (rco-atom e)
      [((GetBang x))
       (let ([xx (gensym (append-point x))])
         (values (list (cons xx (Var x))) (Var xx)))]
      [((or (Begin _ _) (If _ _ _) (Let _ _ _) (Prim _ _) (Collect _) (WhileLoop _ _) (SetBang _ _)
-           (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _)))
+           (Allocate _ _) (GlobalValue _) (FunRef _ _) (AllocateClosure _ _ _) (ValueOf _ _) (Exit)))
       (let ([x (exp->symbol e)])
         (values (list (cons x (rco-exp e))) (Var x)))]
      [(_) (values '() e)])
@@ -447,6 +691,8 @@
       (define (explicate-effects effs cont)
         (match effs
           ['() cont]
+          [(cons (Exit) effs)
+           (Exit)]
           [(cons (Apply f args) effs)
            (define x (gensym 'not.used.))
            (explicate-assign x (Apply f args) (explicate-effects effs cont))]
@@ -463,6 +709,10 @@
            (Seq (Prim 'read '()) (explicate-effects effs cont))]
           [(cons (Prim 'vector-set! args) effs)
            (Seq (Prim 'vector-set! args) (explicate-effects effs cont))]
+          [(cons (Prim 'proxy-vector-set! args) effs)
+           (Seq (Prim 'proxy-vector-set! args) (explicate-effects effs cont))]
+          [(cons (Prim 'any-vector-set! args) effs)
+           (explicate-assign (gensym 'not.used.) (Prim 'any-vector-set! args) (explicate-effects effs cont))]
           [(cons (Collect n) effs)
            (Seq (Collect n) (explicate-effects effs cont))]
           [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _) (AllocateClosure _ _ _)) effs)
@@ -475,6 +725,7 @@
       
       (define (explicate-if c t e)
         (match c
+          [(Exit) (Exit)]
           [(Apply f args)
            (define cond-var (gensym 'if.cond.))
            (explicate-assign cond-var (Call f args) (explicate-if (Var cond-var) t e))]
@@ -491,6 +742,9 @@
              (emit-block 'else. e))]
           [(Prim op args) #:when (set-member? '(eq? < <= > >=) op)
            (IfStmt c (emit-block 'then. t) (emit-block 'else. e))]
+          [(Prim _ _)
+           (define cond-var (gensym 'if.cond.))
+           (explicate-assign cond-var c (explicate-if (Var cond-var) t e))]
           [(If c2 t2 e2)
            (let ([goto-t (emit-block 'then. t)]
                  [goto-e (emit-block 'else. e)])
@@ -501,6 +755,7 @@
       
       (define (explicate-assign x e cont)
         (match e
+          [(Exit) (Exit)]
           [(Apply f args) (Seq (Assign (Var x) (Call f args)) cont)]
           [(or (Collect _) (SetBang _ _) (WhileLoop _ _))
            (explicate-effects (list e) (explicate-assign x (Void) cont))]
@@ -513,6 +768,7 @@
           [_ (Seq (Assign (Var x) e) cont)]))
       
       (define/match (explicate-tail e)
+        [((Exit)) (Exit)]
         [((Apply f args)) (TailCall f args)]
         [((or (Collect _) (SetBang _ _) (WhileLoop _ _)))
          (explicate-effects (list e) (Return (Void)))]
@@ -523,9 +779,9 @@
         [(_) (Return e)])
       
       (Def name params rty info
-           (let ([start (explicate-tail body)])
-             (dict-set! blocks (symbol-append name 'start) start)
-             (make-immutable-hash (hash->list blocks))))])
+        (let ([start (explicate-tail body)])
+         (dict-set! blocks (symbol-append name 'start) start)
+         (make-immutable-hash (hash->list blocks))))])
    
    (ProgramDefs info (map explicate-control-Def defs))])
 
@@ -542,7 +798,7 @@
         (define pointer-mask
           (for/fold ([mask 0]) ([i (in-naturals)] [t elem-types])
             (bitwise-ior mask
-              (if (Vector? t)
+              (if (gc-type? t)
                 (arithmetic-shift 1 (+ 7 i))
                 0))))
         (define vector-length (arithmetic-shift (length elem-types) 1))
@@ -566,6 +822,92 @@
         [((GlobalValue x)) (Global x)])
       
       (define/match (si-stmt s)
+        [((Assign x (Prim 'inject-vector (list e))))
+         (list (Instr 'movq (list (si-atom e) x)))]
+        [((Assign x (Prim 'inject-proxy (list e))))
+         (list
+           (Instr 'movq (list (si-atom e) (Reg 'r11)))
+           (Instr 'movq (list (Imm (arithmetic-shift 1 63)) (Reg 'rax)))
+           (Instr 'orq (list (Reg 'rax) (Deref 'r11 0)))
+           (Instr 'movq (list (Reg 'r11) x)))]
+        [((Assign x (Prim 'proxy? (list e))))
+         (list
+           (Instr 'movq (list (si-atom e) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
+           (Instr 'sarq (list (Imm 63) (Reg 'rax)))
+           (Instr 'andq (list (Imm 1) (Reg 'rax)))
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Assign x (Prim 'project-vector (list e))))
+         (list (Instr 'movq (list (si-atom e) x)))]
+        [((Assign x (Prim 'proxy-vector-set! (list v i e))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (si-atom i) (Reg 'rsi)))
+           (Instr 'movq (list (si-atom e) (Reg 'rdx)))
+           (Callq 'proxy_vector_set 3)
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Prim 'proxy-vector-set! (list v i e)))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (si-atom i) (Reg 'rsi)))
+           (Instr 'movq (list (si-atom e) (Reg 'rdx)))
+           (Callq 'proxy_vector_set 3))]
+        [((Assign x (Prim 'proxy-vector-ref (list v i))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (si-atom i) (Reg 'rsi)))
+           (Callq 'proxy_vector_ref 2)
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Assign x (Prim 'proxy-vector-length (list v))))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'rdi)))
+           (Callq 'proxy_vector_length 1)
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Assign x (Prim 'make-any (list e (Int tag))))) #:when (= 2 (bitwise-and tag 2))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [((Assign x (Prim 'make-any (list e (Int tag))))) #:when (= 0 (bitwise-and tag 2))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'salq (list (Imm 3) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [((Assign x (Prim 'tag-of-any (list e))))
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'andq (list (Imm 7) x)))]
+        [((Assign x (ValueOf e t))) #:when (pair? t)
+         (list
+           (Instr 'movq (list (Imm -8) x))
+           (Instr 'andq (list (si-atom e) x)))]
+        [((Assign x (ValueOf e t))) #:when (symbol? t)
+         (list
+           (Instr 'movq (list (si-atom e) x))
+           (Instr 'sarq (list (Imm 3) x)))]
+        [((Assign x (Prim 'any-vector-length (list v))))
+         (list
+           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
+           (Instr 'andq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
+           (Callq 'proxy_vector_length 1)
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Assign x (Prim 'any-vector-ref (list v i))))
+         (list
+           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
+           (Instr 'andq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
+           (Instr 'movq (list (si-atom i) (Reg 'rsi)))
+           (Callq 'proxy_vector_ref 2)
+           (Instr 'movq (list (Reg 'rax) x)))]
+        [((Assign x (Prim 'any-vector-set! (list v i e))))
+         (list
+           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
+           (Instr 'andq (list (si-atom v) (Reg 'rdi)))
+           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
+           (Instr 'movq (list (si-atom i) (Reg 'rsi)))
+           (Instr 'movq (list (si-atom e) (Reg 'rdx)))
+           (Callq 'proxy_vector_set 2)
+           (Instr 'movq (list (Reg 'rax) x)))]
         [((Assign x (FunRef name _)))
          (list
            (Instr 'leaq (list (Global name) x)))]
@@ -585,6 +927,10 @@
            (Instr 'movq (list (si-atom v) (Reg 'r11)))
            (Instr 'movq (list (si-atom e) (Deref 'r11 (vector-offset n))))
            (Instr 'movq (list (Imm 0) x)))]
+        [((Prim 'vector-set! (list v (Int n) e)))
+         (list
+           (Instr 'movq (list (si-atom v) (Reg 'r11)))
+           (Instr 'movq (list (si-atom e) (Deref 'r11 (vector-offset n)))))]
         [((Assign x (Prim 'vector-length (list v))))
          (list
            (Instr 'movq (list (si-atom v) (Reg 'r11)))
@@ -618,10 +964,6 @@
            (Instr 'movq (list (Reg 'r15) (Reg 'rdi)))
            (Instr 'movq (list (Imm n) (Reg 'rsi)))
            (Callq 'collect 2))]
-        [((Prim 'vector-set! (list v (Int n) e)))
-         (list
-           (Instr 'movq (list (si-atom v) (Reg 'r11)))
-           (Instr 'movq (list (si-atom e) (Deref 'r11 (vector-offset n)))))]
         [((Assign x (Prim 'read '()))) (list (Callq 'read_int 0) (Instr 'movq (list (Reg 'rax) x)))]
         [((Assign x (Prim '- (list a))))
          (if (equal? x a)
@@ -649,6 +991,10 @@
         [((Prim 'read '())) (list (Callq 'read_int 0))])
       
       (define/match (si-tail tail)
+        [((Exit))
+         (list
+           (Instr 'movq (list (Imm 255) (car argument-passing-registers)))
+           (Callq 'exit 1))]
         [((TailCall f args))
          (append
            (for/list ([a args] [r argument-passing-registers])
@@ -669,14 +1015,14 @@
           (Instr 'movq (list r (Var (car p))))))
       
       (Def name '() 'Integer
-          (dict-set* info 'num-root-spills 0 'num-params (length params))
-          (hash-map/copy blocks 
-            (lambda (label block)
-              (values label
-                (Block '()
-                  (if (eq? label (symbol-append name 'start))
-                    (append copy-arguments (si-tail block))
-                    (si-tail block)))))))])
+        (dict-set* info 'num-root-spills 0 'num-params (length params))
+        (hash-map/copy blocks
+          (lambda (label block)
+            (values label
+              (Block '()
+                (if (eq? label (symbol-append name 'start))
+                  (append copy-arguments (si-tail block))
+                  (si-tail block)))))))])
    
    (ProgramDefs info (map select-instructions-Def defs))])
 
@@ -689,7 +1035,7 @@
 (define (locations-written instr)
   (set-filter location?
     (match instr
-      [(Instr (or 'addq 'subq 'xorq 'movq 'movzbq 'andq 'sarq 'leaq) (list _ b)) (set b)]
+      [(Instr (or 'addq 'subq 'imulq 'xorq 'movq 'movzbq 'andq 'orq 'sarq 'salq 'leaq) (list _ b)) (set b)]
       [(Instr (or 'negq 'pushq 'popq) (list a)) (set a)]
       [(Instr 'set (list _ a)) (set (enlarge-reg a))]
       [(Instr 'cmpq _) (set)]
@@ -699,7 +1045,7 @@
       [(or (Jmp _) (JmpIf _ _) (TailJmp _ _)) (set)]
       [_ (error 'locations-written "unhandled case: ~a" (Instr-name instr))])))
 
-(define/match (enlarge-reg arg)
+(define/match (enlarge-reg reg)
   [((ByteReg (or 'ah 'al))) (Reg 'rax)]
   [((ByteReg (or 'bh 'bl))) (Reg 'rbx)]
   [((ByteReg (or 'ch 'cl))) (Reg 'rcx)]
@@ -718,7 +1064,7 @@
       (define (locations-read instr)
         (set-filter location?
           (match instr
-            [(Instr (or 'addq 'subq 'xorq 'cmpq 'negq 'andq 'sarq) args) (list->set args)]
+            [(Instr (or 'addq 'subq 'imulq 'xorq 'cmpq 'negq 'andq 'orq 'sarq 'salq) args) (list->set args)]
             [(Instr (or 'movq 'leaq) (list a _)) (set a)]
             [(Instr 'movzbq (list a _)) (set (enlarge-reg a))]
             [(Instr (or 'pushq 'popq 'set) _) (set)]
@@ -754,7 +1100,7 @@
                  (add-vertex! gr label)
                  (add-directed-edge! gr label curr-label)]
                 [_ '()])))
-          gr))
+         gr))
       
       (define (analyse-dataflow cfg transfer bottom join)
         (define label->live-before (make-hash))
@@ -786,7 +1132,7 @@
 
 (define/match (build-interference p)
   [((ProgramDefs info defs))
- 
+   
    (define/match (build-interference-Def p)
      [((Def name '() 'Integer info blocks))
       
@@ -815,7 +1161,7 @@
                  (add-edge! gr v d)))])
           (when (or (Callq? instr) (IndirectCallq? instr))
             (define locals-types (dict-ref info 'locals-types))
-            (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (Vector? (dict-ref locals-types (Var-name v)))))
+            (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (gc-type? (dict-ref locals-types (Var-name v)))))
               (for ([r callee-saved-registers])
                 (add-edge! gr v r))))))
       
@@ -892,7 +1238,7 @@
                       (for/fold ([reg-variables '()] [stack-variables '()] [root-variables '()])
                                 ([(location color) (in-dict location->color)])
                         (if (>= color num-regs)
-                          (if (Vector? (dict-ref locals-types (Var-name location)))
+                          (if (gc-type? (dict-ref locals-types (Var-name location)))
                             (values reg-variables stack-variables (cons (cons location color) root-variables))
                             (values reg-variables (cons (cons location color) stack-variables) root-variables))
                           (values (cons (cons location color) reg-variables) stack-variables root-variables)))])
@@ -1055,23 +1401,29 @@
   
 (define (annotate-var-type e)
   (parameterize ([typed-vars #t])
-    (type-check-Llambda e)))
+    (type-check-Lany-proxy e)))
   
 (define compiler-passes
-  `(("shrink" ,shrink ,interp-Llambda ,type-check-Llambda)
-    ("uniquify" ,uniquify ,interp-Llambda ,type-check-Llambda)
-    ("reveal FunRef" ,reveal-functions ,interp-Llambda-prime ,type-check-Llambda)
-    ("convert assignments" ,convert-assignments ,interp-Llambda-prime ,type-check-Llambda)
-    ("annotate var types" ,(lambda (x) x) ,interp-Llambda-prime ,annotate-var-type)
-    ("convert closures" ,convert-closures ,interp-Llambda-prime ,type-check-Llambda)
-    ("limit funtion parameters" ,limit-functions ,interp-Llambda-prime ,type-check-Llambda)
-    ("expose allocation" ,expose-allocation ,interp-Llambda-prime ,type-check-Llambda)
-    ("uncover get!" ,uncover-get! ,interp-Llambda-prime ,type-check-Llambda)
-    ("remove complex operands" ,remove-complex-operands ,interp-Llambda-prime ,type-check-Llambda)
-    ("explicate control" ,explicate-control ,interp-Clambda ,type-check-Clambda)
-    ("instruction selection" ,select-instructions ,interp-x86-4)
-    ("liveness analysis" ,uncover-live ,interp-x86-4)
-    ("build interference graph" ,build-interference ,interp-x86-4)
-    ("allocate registers" ,allocate-registers ,interp-x86-4)
-    ("patch instructions" ,patch-instructions ,interp-x86-4)
+  `(
+    ("add main function" ,add-main ,interp-Lcast ,type-check-gradual)
+    ("lower casts" ,lower-casts ,interp-Lcast ,type-check-Lany-proxy)
+    ("differentiate proxies" ,differentiate-proxies ,interp-Lcast ,type-check-Lany-proxy)
+    ("shrink" ,shrink ,interp-Lcast ,type-check-Lany-proxy)
+    ("uniquify" ,uniquify ,interp-Lcast ,type-check-Lany-proxy)
+    ("reveal FunRef" ,reveal-functions ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("reveal casts" ,reveal-casts ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("convert assignments" ,convert-assignments ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("annotate var types" ,(lambda (x) x) ,interp-Lcast-prime ,annotate-var-type)
+    ("convert closures" ,convert-closures ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("limit funtion parameters" ,limit-functions ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("expose allocation" ,expose-allocation ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("uncover get!" ,uncover-get! ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("remove complex operands" ,remove-complex-operands ,interp-Lcast-prime ,type-check-Lany-proxy)
+    ("explicate control" ,explicate-control ,interp-Cany-proxy ,type-check-Cany-proxy)
+    ("instruction selection" ,select-instructions ,interp-x86-5)
+    ("liveness analysis" ,uncover-live ,interp-x86-5)
+    ("build interference graph" ,build-interference ,interp-x86-5)
+    ("allocate registers" ,allocate-registers ,interp-x86-5)
+    ("patch instructions" ,patch-instructions ,interp-x86-5)
     ("prelude and conclusion" ,prelude-and-conclusion #f)))
+    

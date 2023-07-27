@@ -1766,7 +1766,7 @@
 
     (define (vector-proxy? vec)
       (define tag ((memory-read) vec))
-      (equal? 1 (bitwise-and (arithmetic-shift tag -57) 1)))
+      (equal? 1 (bitwise-and (arithmetic-shift tag -63) 1)))
     
     (define (proxy-vector-length vec)
       (copious "gradual/proxy-vector-length" vec)

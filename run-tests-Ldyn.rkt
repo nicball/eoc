@@ -35,6 +35,7 @@
 (interp-tests "while" strip-types compiler-passes interp-Ldyn "while_test" (tests-for "while"))
 (interp-tests "vec" strip-types compiler-passes interp-Ldyn "vectors_test" (tests-for "vectors"))
 (interp-tests "fun" strip-types compiler-passes interp-Ldyn "functions_test" (tests-for "functions"))
+(debug-level 1)
 (interp-tests "dynamic" strip-types compiler-passes interp-Ldyn "dynamic_test" (tests-for "dynamic"))
 
 ;; Uncomment the following when all the passes are complete to

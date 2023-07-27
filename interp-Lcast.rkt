@@ -46,8 +46,19 @@
         ['any-vector-length (lambda (v)
                               (match v [(Tagged v^ tg)
                                         (guarded-vector-length v^)]))]
-        [else (super interp-op op)]
-        ))
+        ['raw-vector vector]
+        ['vector-proxy (lambda (v rv wv) `(vector-proxy ,(vector v rv wv)))]
+        ['inject-vector (lambda (v) v)]
+        ['inject-proxy (lambda (v) `(vector-proxy ,v))]
+        ['proxy? (match-lambda
+                   [`(vector-proxy ,_) #t]
+                   [_ #f])]
+        ['project-vector (lambda (v) v)]
+        ['proxy-vector-ref guarded-vector-ref]
+        ['proxy-vector-set! guarded-vector-set!]
+        ['proxy-vector-length guarded-vector-length]
+        [else (super interp-op op)]))
+        
 
     (define/public (apply-cast v s t)
       (match* (s t)
@@ -90,8 +101,8 @@
                               (for/list ([x xs][t1 ts1][t2 ts2])
                                 (Cast (Var x) t2 t1)))
                        rt1 rt2)
-                   '())]
-        ))
+                   '())]))
+        
     
     (define/override ((interp-exp env) e)
       (define (recur e) ((interp-exp env) e))
@@ -103,9 +114,9 @@
            (apply-cast (recur e) src tgt)]
           [else ((super interp-exp env) e)]))
       (verbose "Lcast/interp-exp" e result)
-      result)
+      result)))
     
-    ))
+    
 
 (define (interp-Lcast p)
   (send (new interp-Lcast-class) interp-program p))
