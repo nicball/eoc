@@ -14,17 +14,17 @@
     ['read read-fixnum]
     ['not (lambda (v) (match v [#t #f] [#f #t]))]
     ['< (lambda (v1 v2)
-	  (cond [(and (fixnum? v1) (fixnum? v2))
-		 (< v1 v2)]))]
+          (cond [(and (fixnum? v1) (fixnum? v2))
+                 (< v1 v2)]))]
     ['<= (lambda (v1 v2)
-	   (cond [(and (fixnum? v1) (fixnum? v2))
-		  (<= v1 v2)]))]
+           (cond [(and (fixnum? v1) (fixnum? v2))
+                  (<= v1 v2)]))]
     ['> (lambda (v1 v2)
-	  (cond [(and (fixnum? v1) (fixnum? v2))
-		 (> v1 v2)]))]
+          (cond [(and (fixnum? v1) (fixnum? v2))
+                 (> v1 v2)]))]
     ['>= (lambda (v1 v2)
-	   (cond [(and (fixnum? v1) (fixnum? v2))
-		  (>= v1 v2)]))]
+           (cond [(and (fixnum? v1) (fixnum? v2))
+                  (>= v1 v2)]))]
     ['boolean? boolean?]
     ['integer? fixnum?]
     ['void? void?]
@@ -44,8 +44,8 @@
     ['<= '((Integer Integer))]
     ['> '((Integer Integer))]
     ['>= '((Integer Integer))]
-    ['vector-length '((Vector))]
-    ))
+    ['vector-length '((Vector))]))
+    
 
 (define type-predicates
   (set 'boolean? 'integer? 'vector? 'procedure? 'void?))
@@ -116,6 +116,10 @@
               [else (Tagged #f 'Boolean)])]
       [(Prim 'eq? (list e1 e2))
        (Tagged (equal? (recur e1) (recur e2)) 'Boolean)]
+      [(Prim 'procedure-arity (list e))
+       (match (recur e)
+         [(Tagged (Function args _ _) 'Procedure)
+          (Tagged (length args) 'Integer)])]
       [(Prim op (list e1))
        #:when (set-member? type-predicates op)
        (tag-value ((interp-op op) (Tagged-value (recur e1))))]
@@ -156,8 +160,8 @@
      (define top-level (map (lambda (d) (interp-Ldyn-def d)) ds))
      (for/list ([b top-level])
        (set-box! (cdr b) (match (unbox (cdr b))
-                      [(Function xs body '())
-                       (Tagged (Function xs body top-level) 'Procedure)])))
+                          [(Function xs body '())
+                           (Tagged (Function xs body top-level) 'Procedure)])))
      (define result ((interp-Ldyn-exp top-level) body))
      (check-tag result 'Integer ast)
      (Tagged-value result)]
@@ -170,8 +174,8 @@
      (define top-level (map (lambda (d) (interp-Ldyn-def d)) ds))
      (for/list ([b top-level])
        (set-box! (cdr b) (match (unbox (cdr b))
-                      [(Function xs body '())
-                       (Tagged (Function xs body top-level) 'Procedure)])))
+                          [(Function xs body '())
+                           (Tagged (Function xs body top-level) 'Procedure)])))
      (define result ((interp-Ldyn-exp top-level) (Apply (Var 'main) '())))
      (check-tag result 'Integer ast)
      (Tagged-value result)]))

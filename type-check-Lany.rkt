@@ -27,8 +27,8 @@
          (procedure? . ((Any) . Boolean))
          (void? . ((Any) . Boolean))
          (tag-of-any . ((Any) . Integer))
-         (make-any . ((_ Integer) . Any))
-         )
+         (make-any . ((_ Integer) . Any)))
+         
        (super operator-types)))
 
     (define/public (type-predicates)
@@ -64,8 +64,8 @@
         [`(,ts ... -> ,rt)
          (and (eq? rt 'Any) (for/and ([t ts]) (eq? t 'Any)))]
         [else
-         #f]
-        ))
+         #f]))
+        
 
     (define/override (type-check-exp env)
       (lambda (e)
@@ -102,6 +102,15 @@
            (check-type-equal? t2 'Integer e)
            (check-type-equal? t3 'Any e)
            (values (Prim 'any-vector-set! (list e1^ e2^ e3^)) 'Void)]
+          [(Prim 'procedure-arity (list e1))
+           (define-values (e1^ t) (recur e1))
+           (match t
+             [(or `(,_ ... -> ,_)
+                  `(Vector ((Vector ,_) ,_ ... -> ,_) ,_ ...)
+                  'Any)
+              (values (Prim 'procedure-arity (list e1^)) 'Integer)]
+             [else (error 'type-check
+                          "expected a function not ~a\nin ~v" t e)])]
           [(Inject e1 ty)
            (unless (flat-ty? ty)
              (error 'type-check "may only inject from flat type, not ~a" ty))
@@ -133,9 +142,9 @@
              [(`(Vectorof ,t1) `(Vectorof ,t2))         (void)]
              [(other wise) (check-type-equal? t1 t2 e)])
            (values (Prim 'eq? (list e1 e2)) 'Boolean)]
-          [else ((super type-check-exp env) e)])))
+          [else ((super type-check-exp env) e)])))))
 
-    ))
+    
 
 (define (type-check-Lany p)
   (send (new type-check-Lany-class) type-check-program p))

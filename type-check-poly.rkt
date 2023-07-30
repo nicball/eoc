@@ -1,11 +1,11 @@
 #lang racket
 (require "utilities.rkt")
-(require "type-check-Lwhile.rkt")
+(require "type-check-Llambda.rkt")
 
 (provide type-check-poly type-check-poly-class)
 
 (define type-check-poly-class
-  (class type-check-Lwhile-class
+  (class type-check-Llambda-class
     (super-new)
     (inherit check-type-equal?)
 
@@ -22,27 +22,27 @@
     (define/public (match-types env pat1 t2)
       (verbose 'type-check "match-types" env pat1 t2)
       (define result
-      (match* (pat1 t2)
-        [('Integer 'Integer) env]
-        [('Boolean 'Boolean) env]
-        [('Void 'Void) env]
-        [('Any 'Any) env]
-        [(`(Vector ,ts1 ...) `(Vector ,ts2 ...))
-         (for/fold ([env^ env]) ([pat1 ts1] [t2 ts2])
-           (match-types env^ pat1 t2))]
-        [(`(,ts1 ... -> ,rt1) `(,ts2 ... -> ,rt2))
-         (define env^ (match-types env rt1 rt2))
-         (for/fold ([env^^ env^]) ([pat1 ts1] [t2 ts2])
-           (match-types env^^ pat1 t2))]
-        [(`(All ,xs1 ,t1) `(All ,xs2 ,t2))
-         (define env^ (append (map cons xs1 xs2) env))
-         (match-types env^ t1 t2)]
-        [((? symbol? x) t)
-         (match (dict-ref env x (lambda () #f))
-           [#f (error 'type-check "undefined type variable ~a" x)]
-           ['Type (cons (cons x t) env)]
-           [t^ (check-type-equal? t t^ 'matching) env])]
-        [(other wise) (error 'type-check "mismatch ~a != a" pat1 t2)]))
+       (match* (pat1 t2)
+         [('Integer 'Integer) env]
+         [('Boolean 'Boolean) env]
+         [('Void 'Void) env]
+         [('Any 'Any) env]
+         [(`(Vector ,ts1 ...) `(Vector ,ts2 ...))
+          (for/fold ([env^ env]) ([pat1 ts1] [t2 ts2])
+            (match-types env^ pat1 t2))]
+         [(`(,ts1 ... -> ,rt1) `(,ts2 ... -> ,rt2))
+          (define env^ (match-types env rt1 rt2))
+          (for/fold ([env^^ env^]) ([pat1 ts1] [t2 ts2])
+            (match-types env^^ pat1 t2))]
+         [(`(All ,xs1 ,t1) `(All ,xs2 ,t2))
+          (define env^ (append (map cons xs1 xs2) env))
+          (match-types env^ t1 t2)]
+         [((? symbol? x) t)
+          (match (dict-ref env x (lambda () #f))
+            [#f (error 'type-check "undefined type variable ~a" x)]
+            ['Type (cons (cons x t) env)]
+            [t^ (check-type-equal? t t^ 'matching) env])]
+         [(other wise) (error 'type-check "mismatch ~a != a" pat1 t2)]))
       (copious 'match-types "done" pat1 t2 result)
       result)
 
@@ -108,7 +108,7 @@
            [`(,ps ... -> ,rt)
             (define params^ (for/list ([x params] [T ps]) `[,x : ,T]))
             (cons (Def name params^ rt info body) (combine-decls-defs ds^))]
-           [else (error 'type-check "expected a function type, not ~a" type) ])]
+           [else (error 'type-check "expected a function type, not ~a" type)])]
         [`(,(Def f params rt info body) . ,ds^)
          (cons (Def f params rt info body) (combine-decls-defs ds^))]))
 
@@ -175,9 +175,9 @@
          (define ds^^ (for/list ([d ds^]) ((type-check-def new-env) d)))
          (define-values (body^ ty) ((type-check-exp new-env) body))
          (check-type-equal? ty 'Integer body)
-         (ProgramDefsExp info ds^^ body^)]))
+         (ProgramDefsExp info ds^^ body^)]))))
     
-    ))
+    
 
 (define (type-check-poly p)
   (send (new type-check-poly-class) type-check-program p))

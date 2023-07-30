@@ -35,6 +35,7 @@
 (interp-tests "while" type-check-gradual compiler-passes interp-Lcast "while_test" (tests-for "while"))
 (interp-tests "vec" type-check-gradual compiler-passes interp-Lcast "vectors_test" (tests-for "vectors"))
 (interp-tests "fun" type-check-gradual compiler-passes interp-Lcast "functions_test" (tests-for "functions"))
+(interp-tests "lambda" type-check-gradual compiler-passes interp-Lcast "lambda_test" (tests-for "lambda"))
 (interp-tests "gradual" type-check-gradual compiler-passes interp-Lcast "gradual_test" (tests-for "gradual"))
 
 ;; Uncomment the following when all the passes are complete to

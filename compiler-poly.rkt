@@ -1,6 +1,8 @@
 #lang racket
 (require racket/set racket/stream)
 (require racket/fixnum)
+(require "interp-poly.rkt")
+(require "type-check-poly.rkt")
 (require "interp-Lcast.rkt")
 (require "interp-Lcast-prime.rkt")
 (require "type-check-gradual.rkt")
@@ -48,7 +50,8 @@
     [(HasType e t) (f (HasType ((induct-L f) e) t))]
     [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]
     [(Closure arity exps) (f (Closure arity (map (induct-L f) exps)))]
-    [(Cast e s t) (f (Cast ((induct-L f) e) s t))]))
+    [(Cast e s t) (f (Cast ((induct-L f) e) s t))]
+    [(Inst e t v) (f (Inst ((induct-L f) e) t v))]))
 
 (define/match (subexpressions exp)
   [((or (Inject e _) (Project e _) (ValueOf e _))) (list e)]
@@ -73,17 +76,74 @@
   [(`(,_ ... -> ,_)) #b011]
   [('Void) #b101])
 
-(define/match (add-main p)
-  [((Program info exp))
-   (add-main (ProgramDefsExp info '() exp))]
-  [((ProgramDefsExp info ds exp))
-   (ProgramDefs info (append ds
-                       (list (Def 'main '() 'Integer (hash) exp))))]
-  [((ProgramDefs _ _))
-   p])
+(define/match (erase-types p)
+  [((ProgramDefsExp info defs exp))
+   
+   (define ((subst-type f) t)
+     (match t
+       [`(,arg-tys ... -> ,rty) `(,@(map (subst-type f) arg-tys) -> ,((subst-type f) rty))]
+       [`(Vector ,etys ...) `(Vector ,@(map (subst-type f) etys))]
+       [`(All ,ty-vars ,ty)
+        (define (new-f t)
+          (if (set-member? ty-vars t)
+            t
+            (f t)))
+        `(All ,ty-vars ,((subst-type new-f) ty))]
+       [t (f t)]))
+   
+   (define ((erase-All env) ty)
+     (match ty
+       [`(,arg-tys ... -> ,rty) `(,@(map (erase-All env) arg-tys) -> ,((erase-All env) rty))]
+       [`(Vector ,etys) `(Vector ,@(map (erase-All env) etys))]
+       [`(All ,ty-vars ,ty)
+        (define new-env
+          (for/fold ([new-env env]) ([v ty-vars])
+            (set-add new-env v)))
+        ((erase-All new-env) ty)]
+       [t #:when (set-member? env t) 'Any]
+       [t t]))
+   
+   (define (erase-types-exp env)
+     (induct-L
+       (match-lambda
+         [(Inst e `(All ,ty-vars ,ty) ty-vals)
+          (define (env-subst t)
+            (if (set-member? env t)
+              'Any
+              t))
+          (define (src-subst t)
+            (if (set-member? ty-vars t)
+              'Any
+              t))
+          (define (tgt-subst t)
+            (define m (for/hash ([v ty-vars] [t ty-vals]) (values v t)))
+            (dict-ref m t t))
+          (define src-ty ((erase-All env) ((subst-type env-subst) ((subst-type src-subst) ty))))
+          (define tgt-ty ((erase-All env) ((subst-type env-subst) ((subst-type tgt-subst) ty))))
+          (Cast e src-ty tgt-ty)]
+         [exp exp])))
+   
+   (define ((erase-types-def env) def)
+     (match def
+       [(Poly tyvars def)
+        ((erase-types-def (for/fold ([env env]) ([v tyvars]) (set-add env v))) def)]
+       [(Def name params rty info body)
+        (define (erase t)
+          ((erase-All (set))
+           ((subst-type (lambda (t) (if (set-member? env t) 'Any t)))
+            t)))
+        (Def name
+          (for/list ([p params])
+            (match p
+              [`(,x : ,t) `(,x : ,(erase t))]))
+          (erase rty)
+          info
+          ((erase-types-exp env) body))]))
 
+   (ProgramDefsExp info (map (erase-types-def (set)) defs) ((erase-types-exp (set)) exp))])
+   
 (define/match (lower-casts p)
-  [((ProgramDefs info defs))
+  [((ProgramDefsExp info defs exp))
    
    (define (apply-cast exp source target)
      (match* (source target)
@@ -154,10 +214,10 @@
      [((Def name params rty info body))
       (Def name params rty info (lower-casts-exp body))])
 
-   (ProgramDefs info (map lower-casts-Def defs))])
+   (ProgramDefsExp info (map lower-casts-Def defs) (lower-casts-exp exp))])
 
 (define/match (differentiate-proxies p)
-  [((ProgramDefs info defs))
+  [((ProgramDefsExp info defs exp))
    
    (define/match (differentiate-proxies-type ty)
      [(`(Vector ,tys ...)) `(PVector ,@(map differentiate-proxies-type tys))]
@@ -213,10 +273,10 @@
         info
         (differentiate-proxies-exp body))])
 
-   (ProgramDefs info (map differentiate-proxies-Def defs))])
+   (ProgramDefsExp info (map differentiate-proxies-Def defs) (differentiate-proxies-exp exp))])
 
 (define/match (shrink p)
-  [((ProgramDefs info defs))
+  [((ProgramDefsExp info defs exp))
 
    (define shrink-exp
      (induct-L
@@ -229,7 +289,7 @@
      [((Def name params rty info body))
       (Def name params rty info (shrink-exp body))])
 
-   (ProgramDefs info (map shrink-Def defs))])
+   (ProgramDefs info (append (map shrink-Def defs) (list (Def 'main '() 'Integer (hash) (shrink-exp exp)))))])
 
 (define/match (uniquify p)
   [((ProgramDefs info defs))
@@ -453,6 +513,8 @@
      [(`(Vector ,etys ...))
       `(Vector ,@(map convert-type etys))]
      [(type) type])
+   
+   ;; fix t. (Vector (t args -> rt) fvts)
    
    (define (convert-params closure-var closure-type params)
      (cons (list closure-var ': closure-type)
@@ -1423,7 +1485,7 @@
   
 (define compiler-passes
   `(
-    ("add main function" ,add-main ,interp-Lcast ,type-check-gradual)
+    ("erase types" ,erase-types ,interp-Lcast ,type-check-gradual)
     ("lower casts" ,lower-casts ,interp-Lcast ,type-check-Lany-proxy)
     ("differentiate proxies" ,differentiate-proxies ,interp-Lcast ,type-check-Lany-proxy)
     ("shrink" ,shrink ,interp-Lcast ,type-check-Lany-proxy)

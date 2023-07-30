@@ -82,8 +82,13 @@
        [(Lambda params rty body)
         (define new-env
           (for/fold ([new-env env]) ([p params])
-            (dict-set new-env (car p) (car p))))
-        (Lambda params rty ((uniquify-exp new-env) body))]
+            (dict-set new-env (car p) (gensym (append-point (car p))))))
+        (Lambda
+          (for/list ([p params])
+            (match p
+              [`(,x : ,t) `(,(dict-ref new-env x) : ,t)]))
+          rty
+          ((uniquify-exp new-env) body))]
        [(HasType e t) (HasType ((uniquify-exp env) e) t)]
        [(Apply f args) (Apply ((uniquify-exp env) f) (map (uniquify-exp env) args))]
        [(and exp (or (Void) (Int _) (Bool _))) exp]
@@ -109,8 +114,15 @@
          [(Def name params rty info body)
           (define new-env
             (for/fold ([new-env env]) ([p params])
-              (dict-set new-env (car p) (car p))))
-          (Def name params rty info ((uniquify-exp new-env) body))])))])
+              (dict-set new-env (car p) (gensym (append-point (car p))))))
+          (Def
+            name
+            (for/list ([p params])
+              (match p
+                [`(,x : ,t) `(,(dict-ref new-env x) : ,t)]))
+            rty
+            info
+            ((uniquify-exp new-env) body))])))])
 
 (define/match (reveal-functions p)
   [((ProgramDefs info defs))
@@ -169,6 +181,8 @@
       (define convert
         (induct-L
           (match-lambda
+            [(Let x e body) #:when (set-member? captured x)
+             (Let x (Prim 'vector (list e)) body)]
             [(Var x) #:when (set-member? captured x)
              (Prim 'vector-ref (list (Var x) (Int 0)))]
             [(SetBang x e) #:when (set-member? captured x)
@@ -198,8 +212,10 @@
    (define lifted-defs '())
    
    (define/match (convert-type type)
-     [((list arg-tys ... '-> rty))
-      (list 'Vector `((Vector _) ,@(map convert-type arg-tys) -> ,(convert-type rty)))]
+     [(`(,arg-tys ... -> ,rty))
+      `(Vector ((Vector _) ,@(map convert-type arg-tys) -> ,(convert-type rty)))]
+     [(`(Vector ,etys ...))
+      `(Vector ,@(map convert-type etys))]
      [(type) type])
    
    (define (convert-params closure-var closure-type params)
@@ -219,8 +235,10 @@
         [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
         [(_) (apply hash-union (hash) (map free-variables->type (subexpressions exp)))])
       
-      (define fv->type (free-variables->type lmd))
-      (define closure-type `(Vector _ ,@(for/list ([v fvs]) (dict-ref fv->type v))))
+      (define fv->type-dict (free-variables->type lmd))
+      (define (fv->type t)
+        (convert-type (dict-ref fv->type-dict t)))
+      (define closure-type `(Vector _ ,@(for/list ([v fvs]) (fv->type v))))
       (define closure-var (gensym 'closure.))
       (define lambda-name (gensym 'lambda.))
       
@@ -233,7 +251,7 @@
               lifted-defs))
       
       (define arity (length params))
-      (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (HasType (Var v) (dict-ref fv->type v)))))])
+      (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (Var v))))])
    
    (define convert-exp
      (induct-L

@@ -117,13 +117,23 @@
 (define/match (uniquify p)
   [((ProgramDefs info defs))
    
+   (define/match (param-name p)
+     [(`(,x : ,t)) x]
+     [(x) x])
+   
    (define (uniquify-exp env)
      (match-lambda
        [(Lambda params rty body)
         (define new-env
           (for/fold ([new-env env]) ([p params])
-            (dict-set new-env p p)))
-        (Lambda params rty ((uniquify-exp new-env) body))]
+            (dict-set new-env (param-name p) (gensym (append-point (param-name p))))))
+        (Lambda
+          (for/list ([p params])
+            (match p
+              [`(,x : ,t) `(,(dict-ref new-env x) : ,t)]
+              [x (dict-ref new-env x)]))
+          rty
+          ((uniquify-exp new-env) body))]
        [(HasType e t) (HasType ((uniquify-exp env) e) t)]
        [(Apply f args) (Apply ((uniquify-exp env) f) (map (uniquify-exp env) args))]
        [(and exp (or (Void) (Int _) (Bool _))) exp]
@@ -149,8 +159,16 @@
          [(Def name params rty info body)
           (define new-env
             (for/fold ([new-env env]) ([p params])
-              (dict-set new-env p p)))
-          (Def name params rty info ((uniquify-exp new-env) body))])))])
+              (dict-set new-env (param-name p) (gensym (append-point (param-name p))))))
+          (Def
+            name
+            (for/list ([p params])
+              (match p
+                [`(,x : ,t) `(,(dict-ref new-env x) : ,t)]
+                [x (dict-ref new-env x)]))
+            rty
+            info
+            ((uniquify-exp new-env) body))])))])
 
 (define/match (reveal-functions p)
   [((ProgramDefs info defs))
@@ -203,6 +221,14 @@
           (Inject (Prim 'vector args) `(Vector ,@(for/list ([_ args]) 'Any)))]
          [(Prim 'vector-length args)
           (Inject (Prim 'any-vector-length args) 'Integer)]
+         [(Prim 'procedure-arity (list f))
+          (define f-var (gensym 'procedure-arity.f.))
+          (Let f-var f
+            (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var f-var)))
+                                 (Int (type-tag '(-> Integer)))))
+              (Inject (Prim 'procedure-arity (list (ValueOf (Var f-var) '(-> Integer))))
+                      'Integer)
+              (Exit)))]
          [(Apply f args)
           (Apply (Project f `(,@(for/list ([_ args]) 'Any) -> Any)) args)]
          [(If c t e)
@@ -350,6 +376,8 @@
       (define convert
         (induct-L
           (match-lambda
+            [(Let x e body) #:when (set-member? captured x)
+             (Let x (Prim 'vector (list e)) body)]
             [(Var x) #:when (set-member? captured x)
              (Prim 'vector-ref (list (Var x) (Int 0)))]
             [(SetBang x e) #:when (set-member? captured x)
@@ -379,8 +407,10 @@
    (define lifted-defs '())
    
    (define/match (convert-type type)
-     [((list arg-tys ... '-> rty))
-      (list 'Vector `((Vector _) ,@(map convert-type arg-tys) -> ,(convert-type rty)))]
+     [(`(,arg-tys ... -> ,rty))
+      `(Vector ((Vector _) ,@(map convert-type arg-tys) -> ,(convert-type rty)))]
+     [(`(Vector ,etys ...))
+      `(Vector ,@(map convert-type etys))]
      [(type) type])
    
    (define (convert-params closure-var closure-type params)

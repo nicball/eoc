@@ -767,6 +767,20 @@ Changelog:
      (write-string "-> " port)
      (write-type rt port)
      (write-string ")" port)]
+    [`(All ,vars ,ty)
+     (write-string "(All (" port)
+     (define fst #t)
+     (for ([v vars]) 
+       (if fst
+         (begin
+           (write-type v port)
+           (set! fst #f))
+         (begin
+           (write-string " " port)
+           (write-type v port))))
+     (write-string ") " port)
+     (write-type ty port)
+     (write-string ")" port)]
     [(? symbol?)
      (write-string (symbol->string ty) port)]
     ))
