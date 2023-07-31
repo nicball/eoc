@@ -788,11 +788,11 @@ Changelog:
 (define (write-params param* port)
   (define fst #t)
   (for ([param param*])
+    (if fst (set! fst #f) (write-string " " port))
     (match param
       [(? symbol?)
        (write-string (symbol->string param) port)]
       [`(,x : ,t)
-       (if fst (set! fst #f) (write-string " " port))
        (write-string "[" port)
        (write-string (symbol->string x) port)
        (write-string " : " port)
