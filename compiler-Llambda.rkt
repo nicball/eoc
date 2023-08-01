@@ -909,8 +909,23 @@
               (update-graph (dict-ref (Block-info block) 'live-afters) (Block-instr* block)))
       
             (Def name '() 'Integer (dict-set info 'conflicts gr) blocks)])
+         
+         (define/match (build-move-graph-Def def)
+           [((Def name '() 'Integer info blocks))
+            (define gr (undirected-graph '()))
+            (for ([location (append (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types))
+                                    (map Reg '(rax rbx rcx rdx rsi rdi rsp rbp r8 r9 r10 r11 r12 r13 r14 r15)))])
+              (add-vertex! gr location))
+            (for ([(label block) (in-dict blocks)])
+              (for ([instr (Block-instr* block)])
+                (match instr
+                  [(Instr 'movq (list a b))
+                   (add-edge! gr a b)]
+                  [_ '()])))
+            (Def name '() 'Integer (dict-set info 'move-graph gr) blocks)])
+                         
    
-         (ProgramDefs info (map build-interference-Def defs))]))
+         (ProgramDefs info (map build-move-graph-Def (map build-interference-Def defs)))]))
 
     (define/public (pass-allocate-registers p)
       (match p
@@ -937,12 +952,21 @@
                 (cons -3 (Reg 'rbp))
                 (cons -4 (Reg 'r11))
                 (cons -5 (Reg 'r15))))
+            
+            (define num-regs 11)
       
             (define variables (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types)))
             (define interference (dict-ref info 'conflicts))
             (define location->color (make-hash (map (lambda (p) (cons (cdr p) (car p))) color->reg)))
-            (struct Sat (location forbids))
-            (define queue (make-pqueue (lambda (a b) (>= (set-count (Sat-forbids a)) (set-count (Sat-forbids b))))))
+            (struct Sat [location forbids prefers])
+            (define queue
+              (make-pqueue
+                (lambda (a b)
+                  (let ([sat-a (set-count (Sat-forbids a))]
+                        [sat-b (set-count (Sat-forbids b))])
+                    (or (> sat-a sat-b)
+                      (and (= sat-a sat-b)
+                        (>= (set-count (Sat-prefers a)) (set-count (Sat-prefers b)))))))))
             (define variable->handle (make-hash))
       
             (define (get-saturation v)
@@ -952,25 +976,42 @@
                     (if (dict-has-key? location->color u)
                       (list (dict-ref location->color u))
                       '())))))
+                  
+            (define (get-colored-move-related v)
+              (list->set
+                (filter (lambda (x) (>= x 0))
+                  (concat
+                    (for/list ([u (in-neighbors (dict-ref info 'move-graph) v)])
+                      (if (dict-has-key? location->color u)
+                        (list (dict-ref location->color u))
+                        '()))))))
       
-            (define (greedy-color forbids)
-              (sequence-ref (sequence-filter (lambda (n) (not (set-member? forbids n))) (in-naturals 0)) 0))
+            (define (choose-color sat)
+              (let* ([greedy (sequence-ref (sequence-filter (lambda (n) (not (set-member? (Sat-forbids sat) n))) (in-naturals 0)) 0)]
+                     [preferred (set-subtract (Sat-prefers sat) (Sat-forbids sat))])
+                (if (and (< greedy num-regs) (not (set-empty? preferred)) (>= (apply min (set->list preferred)) num-regs))
+                  greedy
+                  (apply min greedy (set->list preferred)))))
       
             (for ([v variables])
-              (let ([hdl (pqueue-push! queue (Sat v (get-saturation v)))])
+              (let ([hdl (pqueue-push! queue (Sat v (get-saturation v) (get-colored-move-related v)))])
                 (dict-set! variable->handle v hdl)))
       
             (for ([i (in-range (pqueue-count queue))])
               (let* ([v (pqueue-pop! queue)]
-                     [c (greedy-color (Sat-forbids v))])
+                     [c (choose-color v)])
                 (dict-set! location->color (Sat-location v) c)
                 (for ([u (in-neighbors interference (Sat-location v))]
                       #:when (Var? u))
                   (let ([hdl (dict-ref variable->handle u)])
-                    (set-node-key! hdl (Sat u (get-saturation u)))
+                    (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
+                    (pqueue-decrease-key! queue hdl)))
+                (for ([u (in-neighbors (dict-ref info 'move-graph) (Sat-location v))]
+                      #:when (Var? u))
+                  (let ([hdl (dict-ref variable->handle u)])
+                    (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
                     (pqueue-decrease-key! queue hdl)))))
       
-            (define num-regs 11)
             (define locals-types (dict-ref info 'locals-types))
             (define-values (variable->reg variable->stack variable->root)
               (let-values ([(reg-variables stack-variables root-variables)
