@@ -59,7 +59,7 @@
         [(WhileLoop c e) (f (WhileLoop ((induct-L f) c) ((induct-L f) e)))]
         [(HasType e t) (f (HasType ((induct-L f) e) t))]
         [(Apply e es) (f (Apply ((induct-L f) e) (map (induct-L f) es)))]
-        [(Closure arity exps) (f (Closure arity (map f exps)))]))
+        [(Closure arity exps) (f (Closure arity (map (induct-L f) exps)))]))
 
     (define/public (subexpressions exp)
       (match exp
