@@ -82,17 +82,16 @@
         [exp exp]))
          
     (define/public (pass-shrink p)
+      (define shrink-exp (induct-L (lambda (x) (shrink-exp-induct x))))
+ 
+      (define/match (shrink-Def def)
+        [((Def name params rty info body))
+         (Def name params rty info (shrink-exp body))])
+ 
       (match p
         [(Program info exp)
          (pass-shrink (ProgramDefsExp info '() exp))]
         [(ProgramDefsExp info defs exp)
-   
-         (define shrink-exp (induct-L (lambda (x) (shrink-exp-induct x))))
-   
-         (define/match (shrink-Def def)
-           [((Def name params rty info body))
-            (Def name params rty info (shrink-exp body))])
-   
          (ProgramDefs info (append (map shrink-Def defs) (list (shrink-Def (Def 'main '() 'Integer (hash) exp)))))]))
       
     (define/public (uniquify-exp env)
@@ -202,31 +201,29 @@
         [exp exp]))
 
     (define/public (pass-convert-assignments p)
+      (define/match (convert-assignments-Def def)
+        [((Def name params rty info body))
+      
+         (define/match (captured-by-lambda exp)
+           [((Lambda params _ body)) (set-union (captured-by-lambda body) (set-subtract (free-variables body) (list->set (map car params))))]
+           [(_) (apply set-union (set) (map captured-by-lambda (subexpressions exp)))])
+        
+         (define captured (captured-by-lambda body))
+         (define boxed-params
+           (for/hash ([p params]
+                      #:when (set-member? captured (car p)))
+             (values (car p) (gensym (append-point (car p))))))
+      
+         (define new-params 
+           (for/list ([p params])
+             (match p
+               [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
+      
+         (Def name new-params rty info
+           (for/foldr ([new-body ((induct-L (convert-assignments-induct captured)) body)]) ([(p renamed) (in-dict boxed-params)])
+             (Let p (Prim 'vector (list (Var renamed))) new-body)))])
       (match p
         [(ProgramDefs info defs)
-   
-         (define/match (convert-assignments-Def def)
-           [((Def name params rty info body))
-      
-            (define/match (captured-by-lambda exp)
-              [((Lambda params _ body)) (set-union (captured-by-lambda body) (set-subtract (free-variables body) (list->set (map car params))))]
-              [(_) (apply set-union (set) (map captured-by-lambda (subexpressions exp)))])
-        
-            (define captured (captured-by-lambda body))
-            (define boxed-params
-              (for/hash ([p params]
-                         #:when (set-member? captured (car p)))
-                (values (car p) (gensym (append-point (car p))))))
-      
-            (define new-params 
-              (for/list ([p params])
-                (match p
-                  [(list x ': t) (list (dict-ref boxed-params x x) ': t)])))
-      
-            (Def name new-params rty info
-              (for/foldr ([new-body ((induct-L (convert-assignments-induct captured)) body)]) ([(p renamed) (in-dict boxed-params)])
-                (Let p (Prim 'vector (list (Var renamed))) new-body)))])
-   
          (ProgramDefs info (map convert-assignments-Def defs))]))
          
     (define/public (convert-closure-type type)
@@ -239,167 +236,155 @@
         [type type]))
          
     (define/public (pass-convert-closures p)
-      (match p
-        [(ProgramDefs info defs)
+      (define lifted-defs '())
    
-         (define lifted-defs '())
+      (define (convert-params closure-var closure-type params)
+        (cons (list closure-var ': closure-type)
+          (for/list ([p params])
+            (match p
+              [(list x ': t) (list x ': (convert-closure-type t))]))))
    
-         (define (convert-params closure-var closure-type params)
-           (cons (list closure-var ': closure-type)
+      (define/match (lift-lambda lmd)
+        [((Lambda params rty body))
+         (define (sorted-free-variables exp)
+           (sort (set->list (free-variables exp)) symbol<?)) 
+      
+         (define fvs (sorted-free-variables lmd))
+      
+         (define/match (free-variables->type exp)
+           [((HasType (Var x) t)) (hash x t)]
+           [((Lambda params _ body)) (hash-remove* (free-variables->type body) (map car params))]
+           [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
+           [(_) (apply hash-union (hash) (map free-variables->type (subexpressions exp)))])
+      
+         (define fv->type-dict (free-variables->type lmd))
+         (define (fv->type t)
+           (convert-closure-type (dict-ref fv->type-dict t)))
+         (define closure-type `(Vector _ ,@(for/list ([v fvs]) (fv->type v))))
+         (define closure-var (gensym 'closure.))
+         (define lambda-name (gensym 'lambda.))
+      
+         (define new-body
+           (for/foldr ([new-body body]) ([fv fvs] [n (in-naturals)])
+             (Let fv (Prim 'vector-ref (list (Var closure-var) (Int (+ 1 n)))) new-body)))
+      
+         (set! lifted-defs
+           (cons (Def lambda-name (convert-params closure-var closure-type params) (convert-closure-type rty) '() new-body)
+                 lifted-defs))
+      
+         (define arity (length params))
+         (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (Var v))))])
+   
+      (define convert-exp
+        (induct-L
+          (match-lambda
+            [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
+            [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
+            [(Apply f args)
+             (define closure-var (gensym 'closure.))
+             (Let closure-var f
+               (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
+            [exp exp])))
+   
+      (define/match (convert-Def def)
+        [((Def name params rty info body))
+         (define new-params
+           (if (equal? name 'main)
              (for/list ([p params])
                (match p
-                 [(list x ': t) (list x ': (convert-closure-type t))]))))
-   
-         (define/match (lift-lambda lmd)
-           [((Lambda params rty body))
+                 [(list x ': t) (list x ': (convert-closure-type t))]))
+             (convert-params (gensym 'closure.) '(Vector _) params)))
+         (Def name new-params (convert-closure-type rty) info (convert-exp body))])
       
-
-            (define (sorted-free-variables exp)
-              (sort (set->list (free-variables exp)) symbol<?)) 
-      
-            (define fvs (sorted-free-variables lmd))
-      
-            (define/match (free-variables->type exp)
-              [((HasType (Var x) t)) (hash x t)]
-              [((Lambda params _ body)) (hash-remove* (free-variables->type body) (map car params))]
-              [((Let x e body)) (hash-union (free-variables->type e) (hash-remove (free-variables->type body) x))]
-              [(_) (apply hash-union (hash) (map free-variables->type (subexpressions exp)))])
-      
-            (define fv->type-dict (free-variables->type lmd))
-            (define (fv->type t)
-              (convert-closure-type (dict-ref fv->type-dict t)))
-            (define closure-type `(Vector _ ,@(for/list ([v fvs]) (fv->type v))))
-            (define closure-var (gensym 'closure.))
-            (define lambda-name (gensym 'lambda.))
-      
-            (define new-body
-              (for/foldr ([new-body body]) ([fv fvs] [n (in-naturals)])
-                (Let fv (Prim 'vector-ref (list (Var closure-var) (Int (+ 1 n)))) new-body)))
-      
-            (set! lifted-defs
-              (cons (Def lambda-name (convert-params closure-var closure-type params) (convert-closure-type rty) '() new-body)
-                    lifted-defs))
-      
-            (define arity (length params))
-            (Closure arity (cons (FunRef lambda-name arity) (for/list ([v fvs]) (Var v))))])
-   
-         (define convert-exp
-           (induct-L
-             (match-lambda
-               [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
-               [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
-               [(Apply f args)
-                (define closure-var (gensym 'closure.))
-                (Let closure-var f
-                  (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
-               [exp exp])))
-   
-         (define/match (convert-Def def)
-           [((Def name params rty info body))
-            (define new-params
-              (if (eq? name 'main)
-                (for/list ([p params])
-                  (match p
-                    [(list x ': t) (list x ': (convert-closure-type t))]))
-                (convert-params (gensym 'closure.) '(Vector _) params)))
-            (Def name new-params (convert-closure-type rty) info (convert-exp body))])
-   
+      (match p
+        [(ProgramDefs info defs)
          (ProgramDefs info (append (map convert-Def defs) lifted-defs))]))
   
     (define/public (pass-limit-functions p)
+      (define convert-calls
+        (induct-L
+          (match-lambda
+            [(Apply e es)
+             #:when (> (length es) 6)
+             (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
+            [exp exp])))
+   
+      (define/match (limit-functions-Def def)
+        [((Def name params rty info body))
+         (define new-body (convert-calls body))
+         (when (> (length params) 6)
+           (define rest-names (map car (drop params 5)))
+           (define rest-types (map caddr (drop params 5)))
+           (define rest-var (gensym 'rest-params.))
+           (set! params (append (take params 5) (list (list rest-var ': (cons 'Vector rest-types)))))
+           (define rename-rest
+             (induct-L
+               (match-lambda
+                 [(Var x)
+                  #:when (set-member? rest-names x)
+                  (Prim 'vector-ref (list (Var rest-var) (Int (index-of rest-names x))))]
+                 [exp exp])))
+           (set! new-body (rename-rest new-body)))
+         (Def name params rty info new-body)])
+     
       (match p
         [(ProgramDefs info defs)
-   
-         (define/match (limit-functions-Def def)
-           [((Def name params rty info body))
-            #:when (> (length params) 6)
-      
-            (define rest-names (map car (drop params 5)))
-            (define rest-types (map caddr (drop params 5)))
-            (define rest-var (gensym 'rest-params.))
-            (define new-params (append (take params 5) (list (list rest-var ': (cons 'Vector rest-types)))))
-            (define rename-exp
-              (induct-L
-                (match-lambda
-                  [(Var x)
-                   #:when (set-member? rest-names x)
-                   (Prim 'vector-ref (list (Var rest-var) (Int (index-of rest-names x))))]
-                  [(Apply e es)
-                   #:when (> (length es) 6)
-                   (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
-                  [exp exp])))
-      
-            (Def name new-params rty info (rename-exp body))]
-     
-           [((Def name params rty info body))
-      
-            (define rename-exp
-              (induct-L
-                (match-lambda
-                  [(Apply e es)
-                   #:when (> (length es) 6)
-                   (Apply e (append (take es 5) (list (Prim 'vector (drop es 5)))))]
-                  [exp exp])))
-      
-            (Def name params rty info (rename-exp body))])
-   
          (ProgramDefs info (map limit-functions-Def defs))]))
 
     (define/public (pass-expose-allocation p)
+      (define expose-allocation-exp
+        (induct-L
+          (match-lambda
+            [(HasType (Prim 'vector es) type)
+          
+             (define (eval-elems es xs body)
+               (for/foldr ([exp body]) ([x xs] [e es])
+                 (Let x e exp)))
+             (define n (length es))
+             (define allocation-size (* 8 (+ 1 n)))
+             (define check-enough-space
+               (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
+                                  (GlobalValue 'fromspace_end)))
+                 (Void)
+                 (Collect allocation-size)))
+             (define vector-var (gensym 'vector.))
+             (define elems-vars
+               (for/list ([i (in-range n)])
+                 (gensym (symbol-append 'vector.elem. (append-point (string->symbol (number->string i)))))))
+          
+             (eval-elems es elems-vars
+               (Begin (list check-enough-space)
+                 (Let vector-var (Allocate n type)
+                   (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
+                     (Var vector-var)))))]
+        
+            [(HasType (Closure arity es) type)
+          
+             (define (eval-elems es xs body)
+               (for/foldr ([exp body]) ([x xs] [e es])
+                 (Let x e exp)))
+             (define n (length es))
+             (define allocation-size (* 8 (+ 1 n)))
+             (define check-enough-space
+               (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
+                                  (GlobalValue 'fromspace_end)))
+                 (Void)
+                 (Collect allocation-size)))
+             (define closure-var (gensym 'closure.))
+             (define elems-vars
+               (for/list ([i (in-range n)])
+                 (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
+          
+             (eval-elems es elems-vars
+               (Begin (list check-enough-space)
+                 (Let closure-var (AllocateClosure n type arity)
+                   (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var closure-var) (Int i) (Var v))))
+                     (Var closure-var)))))]
+        
+            [exp exp])))
+   
       (match p
         [(ProgramDefs info defs)
-   
-         (define expose-allocation-exp
-           (induct-L
-             (match-lambda
-               [(HasType (Prim 'vector es) type)
-          
-                (define (eval-elems es xs body)
-                  (for/foldr ([exp body]) ([x xs] [e es])
-                    (Let x e exp)))
-                (define n (length es))
-                (define allocation-size (* 8 (+ 1 n)))
-                (define check-enough-space
-                  (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
-                                     (GlobalValue 'fromspace_end)))
-                    (Void)
-                    (Collect allocation-size)))
-                (define vector-var (gensym 'vector.))
-                (define elems-vars
-                  (for/list ([i (in-range n)])
-                    (gensym (symbol-append 'vector.elem. (append-point (string->symbol (number->string i)))))))
-          
-                (eval-elems es elems-vars
-                  (Begin (list check-enough-space)
-                    (Let vector-var (Allocate n type)
-                      (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var vector-var) (Int i) (Var v))))
-                        (Var vector-var)))))]
-        
-               [(HasType (Closure arity es) type)
-          
-                (define (eval-elems es xs body)
-                  (for/foldr ([exp body]) ([x xs] [e es])
-                    (Let x e exp)))
-                (define n (length es))
-                (define allocation-size (* 8 (+ 1 n)))
-                (define check-enough-space
-                  (If (Prim '< (list (Prim '+ (list (GlobalValue 'free_ptr) (Int allocation-size)))
-                                     (GlobalValue 'fromspace_end)))
-                    (Void)
-                    (Collect allocation-size)))
-                (define closure-var (gensym 'closure.))
-                (define elems-vars
-                  (for/list ([i (in-range n)])
-                    (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
-          
-                (eval-elems es elems-vars
-                  (Begin (list check-enough-space)
-                    (Let closure-var (AllocateClosure n type arity)
-                      (Begin (for/list ([i (in-range n)] [v elems-vars]) (Prim 'vector-set! (list (Var closure-var) (Int i) (Var v))))
-                        (Var closure-var)))))]
-        
-               [exp exp])))
-   
          (ProgramDefs info
            (for/list ([def defs])
              (match def
@@ -407,27 +392,26 @@
                 (Def name params rty info (expose-allocation-exp body))])))]))
 
     (define/public (pass-uncover-get! p)
+      (define/match (collect-set! exp)
+        [((SetBang x e)) (set-union (set x) (collect-set! e))]
+        [(_) (apply set-union (set) (map collect-set! (subexpressions exp)))])
+   
+      (define uncover-get!-exp
+        (induct-L
+          (match-lambda
+            [(Prim op args)
+             (let ([muts (apply set-union (set) (map collect-set! args))])
+               (Prim op
+                 (for/list ([arg args])
+                   (match arg
+                     [(Var x)
+                      #:when (set-member? muts x)
+                      (GetBang x)]
+                     [_ arg]))))]
+            [exp exp])))
+   
       (match p
         [(ProgramDefs info defs)
-
-         (define/match (collect-set! exp)
-           [((SetBang x e)) (set-union (set x) (collect-set! e))]
-           [(_) (apply set-union (set) (map collect-set! (subexpressions exp)))])
-   
-         (define uncover-get!-exp
-           (induct-L
-             (match-lambda
-               [(Prim op args)
-                (let ([muts (apply set-union (set) (map collect-set! args))])
-                  (Prim op
-                    (for/list ([arg args])
-                      (match arg
-                        [(Var x)
-                         #:when (set-member? muts x)
-                         (GetBang x)]
-                        [_ arg]))))]
-               [exp exp])))
-   
          (ProgramDefs info
            (for/list ([def defs])
              (match def
@@ -476,14 +460,13 @@
         (match-lambda
           [(GetBang x) (Var x)]
           [exp exp]))
-      (if (eq? var #f)
+      (if (equal? var #f)
         (values '() e)
         (values (list (cons var (remove-get e))) (Var var))))
          
     (define/public (pass-remove-complex-operands p)
       (match p
         [(ProgramDefs info defs)
-   
          (ProgramDefs info
            (for/list ([def defs])
              (match def
@@ -496,13 +479,10 @@
       (dict-set! blocks label block)
       (Goto label))
          
-    (define/public (emit-block symbol block)
-      (define label (gensym symbol))
+    (define/public (emit-block hint block)
       (if (Goto? block)
         block
-        (begin
-          (dict-set! blocks label block)
-          (Goto label))))
+        (emit-named-block (gensym hint) block)))
 
     (define/public (explicate-effects effs cont)
       (match effs
@@ -585,20 +565,68 @@
         [_ (Return e)]))
 
     (define/public (pass-explicate-control p)
+      (define/match (explicate-control-Def def)
+        [((Def name params rty info body))
+      
+         (set! blocks (make-hash))
+      
+         (Def name params rty info
+           (let ([start (explicate-tail body)])
+             (emit-named-block (symbol-append name 'start) start)
+             (make-immutable-hash (hash->list blocks))))])
+   
       (match p
         [(ProgramDefs info defs)
- 
-         (define/match (explicate-control-Def def)
-           [((Def name params rty info body))
-      
-            (set! blocks (make-hash))
-      
-            (Def name params rty info
-              (let ([start (explicate-tail body)])
-                (emit-named-block (symbol-append name 'start) start)
-                (make-immutable-hash (hash->list blocks))))])
-   
          (ProgramDefs info (map explicate-control-Def defs))]))
+         
+    (define/public (pass-optimize-blocks p)
+      (define/match (collect-jumps tail)
+        [((Goto label))
+         (set label)]
+        [((IfStmt c (Goto a) (Goto b)))
+         (set a b)]
+        [((Seq s t))
+         (collect-jumps t)]
+        [(_)
+         (set)])
+      
+      (define (remove-duplicate-blocks blocks)
+        (define uniq->label
+          (for/hash ([(label block) (in-dict blocks)])
+            (values block label)))
+        (define/match (rewrite-jumps tail)
+          [((Goto label))
+           (Goto (dict-ref uniq->label (dict-ref blocks label)))]
+          [((IfStmt c g1 g2))
+           (IfStmt c (rewrite-jumps g1) (rewrite-jumps g2))]
+          [((Seq s t))
+           (Seq s (rewrite-jumps t))]
+          [(s) s])
+        (for/hash ([(label tail) (in-dict blocks)])
+          (values label (rewrite-jumps tail))))
+        
+      (define (remove-orphans defname blocks)
+        (define cfg (make-multigraph '()))
+        (for ([(label tail) (in-dict blocks)])
+          (add-vertex! cfg label)
+          (for ([target (in-set (collect-jumps tail))])
+            (add-directed-edge! cfg label target)))
+        (define orphans
+          (let ([cfg-t (transpose cfg)])
+            (for/set ([label (in-dict-keys blocks)]
+                      #:when (and (not (equal? (symbol-append defname 'start) label))
+                                  (stream-empty? (in-neighbors cfg-t label))))
+              label)))
+        (for/fold ([blocks blocks]) ([label (in-set orphans)])
+          (dict-remove blocks label)))
+        
+      (define/match (optimize-blocks-Def def)
+        [((Def name params rty info blocks))
+         (Def name params rty info (remove-orphans name (remove-duplicate-blocks blocks)))])
+         
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map optimize-blocks-Def defs))]))
 
     (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
          
@@ -734,26 +762,25 @@
         [(Seq stmt tail) (append (select-instructions-stmt stmt) (select-instructions-tail name tail))]))
       
     (define/public (pass-select-instructions p)
+      (define/match (select-instructions-Def p)
+        [((Def name params _ info blocks))
+      
+         (define copy-arguments
+           (for/list ([p params] [r (argument-passing-registers)])
+             (Instr 'movq (list r (Var (car p))))))
+      
+         (Def name '() 'Integer
+           (dict-set* info 'num-root-spills 0 'num-params (length params))
+           (hash-map/copy blocks 
+             (lambda (label block)
+               (values label
+                 (Block '()
+                   (if (equal? label (symbol-append name 'start))
+                     (append copy-arguments (select-instructions-tail name block))
+                     (select-instructions-tail name block)))))))])
+   
       (match p
         [(ProgramDefs info defs)
-
-         (define/match (select-instructions-Def p)
-           [((Def name params _ info blocks))
-      
-            (define copy-arguments
-              (for/list ([p params] [r (argument-passing-registers)])
-                (Instr 'movq (list r (Var (car p))))))
-      
-            (Def name '() 'Integer
-              (dict-set* info 'num-root-spills 0 'num-params (length params))
-              (hash-map/copy blocks 
-                (lambda (label block)
-                  (values label
-                    (Block '()
-                      (if (eq? label (symbol-append name 'start))
-                        (append copy-arguments (select-instructions-tail name block))
-                        (select-instructions-tail name block)))))))])
-   
          (ProgramDefs info (map select-instructions-Def defs))]))
 
     (define/public (location? atom)
@@ -870,191 +897,181 @@
          (ProgramDefs info (map uncover-live-Def defs))]))
 
     (define/public (pass-build-interference p)
+      (define/match (build-interference-Def p)
+        [((Def name '() 'Integer info blocks))
+      
+         (define gr (undirected-graph '()))
+         (for ([location (append (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types))
+                                 (map Reg '(rax rbx rcx rdx rsi rdi rsp rbp r8 r9 r10 r11 r12 r13 r14 r15)))])
+           (add-vertex! gr location))
+      
+         (define (update-graph live-afters instrs)
+           (for ([live-set live-afters]
+                 [instr instrs])
+             (define ds (locations-written instr))
+             (match instr
+               [(Instr 'movq (list a b))
+                (for ([v live-set]
+                      #:when (and (not (equal? v a)) (not (equal? v b))))
+                  (add-edge! gr v b))]
+               [(Instr 'movzbq (list a b))
+                (for ([v live-set]
+                      #:when (and (not (equal? v (enlarge-reg a))) (not (equal? v b))))
+                  (add-edge! gr v b))]
+               [_
+                (for ([v live-set])
+                  (for ([d ds]
+                        #:when (not (equal? v d)))
+                    (add-edge! gr v d)))])
+             (when (or (Callq? instr) (IndirectCallq? instr))
+               (define locals-types (dict-ref info 'locals-types))
+               (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (gc-type? (dict-ref locals-types (Var-name v)))))
+                 (for ([r (callee-saved-registers)])
+                   (add-edge! gr v r))))))
+      
+         (for ([(label block) (in-dict blocks)])
+           (update-graph (dict-ref (Block-info block) 'live-afters) (Block-instr* block)))
+      
+         (Def name '() 'Integer (dict-set info 'conflicts gr) blocks)])
+         
+      (define/match (build-move-graph-Def def)
+        [((Def name '() 'Integer info blocks))
+         (define gr (undirected-graph '()))
+         (for ([location (append (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types))
+                                 (map Reg '(rax rbx rcx rdx rsi rdi rsp rbp r8 r9 r10 r11 r12 r13 r14 r15)))])
+           (add-vertex! gr location))
+         (for ([(label block) (in-dict blocks)])
+           (for ([instr (Block-instr* block)])
+             (match instr
+               [(Instr 'movq (list a b))
+                (add-edge! gr a b)]
+               [_ '()])))
+         (Def name '() 'Integer (dict-set info 'move-graph gr) blocks)])
+                         
       (match p
         [(ProgramDefs info defs)
- 
-         (define/match (build-interference-Def p)
-           [((Def name '() 'Integer info blocks))
-      
-            (define gr (undirected-graph '()))
-            (for ([location (append (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types))
-                                    (map Reg '(rax rbx rcx rdx rsi rdi rsp rbp r8 r9 r10 r11 r12 r13 r14 r15)))])
-              (add-vertex! gr location))
-      
-            (define (update-graph live-afters instrs)
-              (for ([live-set live-afters]
-                    [instr instrs])
-                (define ds (locations-written instr))
-                (match instr
-                  [(Instr 'movq (list a b))
-                   (for ([v live-set]
-                         #:when (and (not (equal? v a)) (not (equal? v b))))
-                     (add-edge! gr v b))]
-                  [(Instr 'movzbq (list a b))
-                   (for ([v live-set]
-                         #:when (and (not (equal? v (enlarge-reg a))) (not (equal? v b))))
-                     (add-edge! gr v b))]
-                  [_
-                   (for ([v live-set])
-                     (for ([d ds]
-                           #:when (not (equal? v d)))
-                       (add-edge! gr v d)))])
-                (when (or (Callq? instr) (IndirectCallq? instr))
-                  (define locals-types (dict-ref info 'locals-types))
-                  (for ([v live-set] #:when (and (Var? v) (dict-has-key? locals-types (Var-name v)) (gc-type? (dict-ref locals-types (Var-name v)))))
-                    (for ([r (callee-saved-registers)])
-                      (add-edge! gr v r))))))
-      
-            (for ([(label block) (in-dict blocks)])
-              (update-graph (dict-ref (Block-info block) 'live-afters) (Block-instr* block)))
-      
-            (Def name '() 'Integer (dict-set info 'conflicts gr) blocks)])
-         
-         (define/match (build-move-graph-Def def)
-           [((Def name '() 'Integer info blocks))
-            (define gr (undirected-graph '()))
-            (for ([location (append (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types))
-                                    (map Reg '(rax rbx rcx rdx rsi rdi rsp rbp r8 r9 r10 r11 r12 r13 r14 r15)))])
-              (add-vertex! gr location))
-            (for ([(label block) (in-dict blocks)])
-              (for ([instr (Block-instr* block)])
-                (match instr
-                  [(Instr 'movq (list a b))
-                   (add-edge! gr a b)]
-                  [_ '()])))
-            (Def name '() 'Integer (dict-set info 'move-graph gr) blocks)])
-                         
-   
          (ProgramDefs info (map build-move-graph-Def (map build-interference-Def defs)))]))
 
     (define/public (pass-allocate-registers p)
+      (define/match (allocate-registers-Def def)
+        [((Def name '() 'Integer info blocks))
+      
+         (define color->reg
+           (list
+             (cons 0 (Reg 'rcx))
+             (cons 1 (Reg 'rdx))
+             (cons 2 (Reg 'rsi))
+             (cons 3 (Reg 'rdi))
+             (cons 4 (Reg 'r8))
+             (cons 5 (Reg 'r9))
+             (cons 6 (Reg 'r10))
+             (cons 7 (Reg 'rbx))
+             (cons 8 (Reg 'r12))
+             (cons 9 (Reg 'r13))
+             (cons 10 (Reg 'r14))
+             (cons -1 (Reg 'rax))
+             (cons -2 (Reg 'rsp))
+             (cons -3 (Reg 'rbp))
+             (cons -4 (Reg 'r11))
+             (cons -5 (Reg 'r15))))
+            
+         (define num-regs 11)
+      
+         (define variables (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types)))
+         (define interference (dict-ref info 'conflicts))
+         (define location->color (make-hash (map (lambda (p) (cons (cdr p) (car p))) color->reg)))
+         (struct Sat [location forbids prefers])
+         (define queue
+           (make-pqueue
+             (lambda (a b)
+               (let ([sat-a (set-count (Sat-forbids a))]
+                     [sat-b (set-count (Sat-forbids b))])
+                 (or (> sat-a sat-b)
+                   (and (= sat-a sat-b)
+                     (>= (set-count (Sat-prefers a)) (set-count (Sat-prefers b)))))))))
+         (define variable->handle (make-hash))
+      
+         (define (get-saturation v)
+           (for/set ([u (in-neighbors interference v)]
+                     #:when (dict-has-key? location->color u))
+             (dict-ref location->color u)))
+                  
+         (define (get-colored-move-related v)
+           (for/set ([u (in-neighbors (dict-ref info 'move-graph) v)]
+                     #:when (nonnegative-integer? (dict-ref location->color u -1)))
+             (dict-ref location->color u)))
+      
+         (define (choose-color sat)
+           (let* ([greedy (sequence-ref (sequence-filter (lambda (n) (not (set-member? (Sat-forbids sat) n))) (in-naturals 0)) 0)]
+                  [preferred (set-subtract (Sat-prefers sat) (Sat-forbids sat))])
+             (if (and (< greedy num-regs) (not (set-empty? preferred)) (>= (apply min (set->list preferred)) num-regs))
+               greedy
+               (apply min greedy (set->list preferred)))))
+      
+         (for ([v variables])
+           (let ([hdl (pqueue-push! queue (Sat v (get-saturation v) (get-colored-move-related v)))])
+             (dict-set! variable->handle v hdl)))
+      
+         (for ([i (in-range (pqueue-count queue))])
+           (let* ([v (pqueue-pop! queue)]
+                  [c (choose-color v)])
+             (dict-set! location->color (Sat-location v) c)
+             (for ([u (in-neighbors interference (Sat-location v))]
+                   #:when (Var? u))
+               (let ([hdl (dict-ref variable->handle u)])
+                 (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
+                 (pqueue-decrease-key! queue hdl)))
+             (for ([u (in-neighbors (dict-ref info 'move-graph) (Sat-location v))]
+                   #:when (Var? u))
+               (let ([hdl (dict-ref variable->handle u)])
+                 (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
+                 (pqueue-decrease-key! queue hdl)))))
+      
+         (define locals-types (dict-ref info 'locals-types))
+         (define-values (variable->reg variable->stack variable->root)
+           (let-values ([(reg-variables stack-variables root-variables)
+                         (for/fold ([reg-variables '()] [stack-variables '()] [root-variables '()])
+                                   ([(location color) (in-dict location->color)])
+                           (if (>= color num-regs)
+                             (if (gc-type? (dict-ref locals-types (Var-name location)))
+                               (values reg-variables stack-variables (cons (cons location color) root-variables))
+                               (values reg-variables (cons (cons location color) stack-variables) root-variables))
+                             (values (cons (cons location color) reg-variables) stack-variables root-variables)))])
+             (values
+               (make-immutable-hash (for/list ([p reg-variables] #:when (Var? (car p))) (cons (car p) (dict-ref color->reg (cdr p)))))
+               (make-immutable-hash (for/list ([p stack-variables] [i (in-naturals)]) (cons (car p) (Deref 'rbp (* -8 (+ 1 i))))))
+               (make-immutable-hash (for/list ([p root-variables] [i (in-naturals)]) (cons (car p) (Deref 'r15 (* -8 (+ 1 i)))))))))
+            
+         (define (transform-instr instr)
+           (define/match (transform-arg arg)
+             [((Var x))
+              (cond
+                [(dict-has-key? variable->reg arg) (dict-ref variable->reg arg)]
+                [(dict-has-key? variable->stack arg) (dict-ref variable->stack arg)]
+                [(dict-has-key? variable->root arg) (dict-ref variable->root arg)])]
+             [(_) arg])
+           (match instr
+             [(Instr op args) (Instr op (map transform-arg args))]
+             [(IndirectCallq f arity) (IndirectCallq (transform-arg f) arity)]
+             [(TailJmp f arity) (TailJmp (transform-arg f) arity)]
+             [_ instr]))
+      
+         (define used-callee-saved-registers
+           (set-intersect (list->set (callee-saved-registers)) (list->set (dict-values variable->reg))))
+         (define stack-variables-size (* 8 (dict-count variable->stack)))
+         (define new-info
+           (list
+             'num-root-spills (dict-count variable->root)
+             'used-callee-saved-registers used-callee-saved-registers
+             'stack-variables-size stack-variables-size))
+      
+         (Def name '() 'Integer (apply dict-set* info new-info)
+           (hash-map/copy blocks
+             (lambda (label block)
+               (values label (Block (Block-info block) (map transform-instr (Block-instr* block)))))))])
+   
       (match p
         [(ProgramDefs info defs)
-   
-         (define/match (allocate-registers-Def def)
-           [((Def name '() 'Integer info blocks))
-      
-            (define color->reg
-              (list
-                (cons 0 (Reg 'rcx))
-                (cons 1 (Reg 'rdx))
-                (cons 2 (Reg 'rsi))
-                (cons 3 (Reg 'rdi))
-                (cons 4 (Reg 'r8))
-                (cons 5 (Reg 'r9))
-                (cons 6 (Reg 'r10))
-                (cons 7 (Reg 'rbx))
-                (cons 8 (Reg 'r12))
-                (cons 9 (Reg 'r13))
-                (cons 10 (Reg 'r14))
-                (cons -1 (Reg 'rax))
-                (cons -2 (Reg 'rsp))
-                (cons -3 (Reg 'rbp))
-                (cons -4 (Reg 'r11))
-                (cons -5 (Reg 'r15))))
-            
-            (define num-regs 11)
-      
-            (define variables (map (lambda (p) (Var (car p))) (dict-ref info 'locals-types)))
-            (define interference (dict-ref info 'conflicts))
-            (define location->color (make-hash (map (lambda (p) (cons (cdr p) (car p))) color->reg)))
-            (struct Sat [location forbids prefers])
-            (define queue
-              (make-pqueue
-                (lambda (a b)
-                  (let ([sat-a (set-count (Sat-forbids a))]
-                        [sat-b (set-count (Sat-forbids b))])
-                    (or (> sat-a sat-b)
-                      (and (= sat-a sat-b)
-                        (>= (set-count (Sat-prefers a)) (set-count (Sat-prefers b)))))))))
-            (define variable->handle (make-hash))
-      
-            (define (get-saturation v)
-              (list->set
-                (concat
-                  (for/list ([u (in-neighbors interference v)])
-                    (if (dict-has-key? location->color u)
-                      (list (dict-ref location->color u))
-                      '())))))
-                  
-            (define (get-colored-move-related v)
-              (list->set
-                (filter (lambda (x) (>= x 0))
-                  (concat
-                    (for/list ([u (in-neighbors (dict-ref info 'move-graph) v)])
-                      (if (dict-has-key? location->color u)
-                        (list (dict-ref location->color u))
-                        '()))))))
-      
-            (define (choose-color sat)
-              (let* ([greedy (sequence-ref (sequence-filter (lambda (n) (not (set-member? (Sat-forbids sat) n))) (in-naturals 0)) 0)]
-                     [preferred (set-subtract (Sat-prefers sat) (Sat-forbids sat))])
-                (if (and (< greedy num-regs) (not (set-empty? preferred)) (>= (apply min (set->list preferred)) num-regs))
-                  greedy
-                  (apply min greedy (set->list preferred)))))
-      
-            (for ([v variables])
-              (let ([hdl (pqueue-push! queue (Sat v (get-saturation v) (get-colored-move-related v)))])
-                (dict-set! variable->handle v hdl)))
-      
-            (for ([i (in-range (pqueue-count queue))])
-              (let* ([v (pqueue-pop! queue)]
-                     [c (choose-color v)])
-                (dict-set! location->color (Sat-location v) c)
-                (for ([u (in-neighbors interference (Sat-location v))]
-                      #:when (Var? u))
-                  (let ([hdl (dict-ref variable->handle u)])
-                    (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
-                    (pqueue-decrease-key! queue hdl)))
-                (for ([u (in-neighbors (dict-ref info 'move-graph) (Sat-location v))]
-                      #:when (Var? u))
-                  (let ([hdl (dict-ref variable->handle u)])
-                    (set-node-key! hdl (Sat u (get-saturation u) (get-colored-move-related u)))
-                    (pqueue-decrease-key! queue hdl)))))
-      
-            (define locals-types (dict-ref info 'locals-types))
-            (define-values (variable->reg variable->stack variable->root)
-              (let-values ([(reg-variables stack-variables root-variables)
-                            (for/fold ([reg-variables '()] [stack-variables '()] [root-variables '()])
-                                      ([(location color) (in-dict location->color)])
-                              (if (>= color num-regs)
-                                (if (gc-type? (dict-ref locals-types (Var-name location)))
-                                  (values reg-variables stack-variables (cons (cons location color) root-variables))
-                                  (values reg-variables (cons (cons location color) stack-variables) root-variables))
-                                (values (cons (cons location color) reg-variables) stack-variables root-variables)))])
-                (values
-                  (make-immutable-hash (for/list ([p reg-variables] #:when (Var? (car p))) (cons (car p) (dict-ref color->reg (cdr p)))))
-                  (make-immutable-hash (for/list ([p stack-variables] [i (in-naturals)]) (cons (car p) (Deref 'rbp (* -8 (+ 1 i))))))
-                  (make-immutable-hash (for/list ([p root-variables] [i (in-naturals)]) (cons (car p) (Deref 'r15 (* -8 (+ 1 i)))))))))
-            
-            (define (transform-instr instr)
-              (define/match (transform-arg arg)
-                [((Var x))
-                 (cond
-                   [(dict-has-key? variable->reg arg) (dict-ref variable->reg arg)]
-                   [(dict-has-key? variable->stack arg) (dict-ref variable->stack arg)]
-                   [(dict-has-key? variable->root arg) (dict-ref variable->root arg)])]
-                [(_) arg])
-              (match instr
-                [(Instr op args) (Instr op (map transform-arg args))]
-                [(IndirectCallq f arity) (IndirectCallq (transform-arg f) arity)]
-                [(TailJmp f arity) (TailJmp (transform-arg f) arity)]
-                [_ instr]))
-      
-            (define used-callee-saved-registers
-              (set-intersect (list->set (callee-saved-registers)) (list->set (dict-values variable->reg))))
-            (define stack-variables-size (* 8 (dict-count variable->stack)))
-            (define new-info
-              (list
-                'num-root-spills (dict-count variable->root)
-                'used-callee-saved-registers used-callee-saved-registers
-                'stack-variables-size stack-variables-size))
-      
-            (Def name '() 'Integer (apply dict-set* info new-info)
-              (hash-map/copy blocks
-                (lambda (label block)
-                  (values label (Block (Block-info block) (map transform-instr (Block-instr* block)))))))])
-   
          (ProgramDefs info (map allocate-registers-Def defs))]))
          
     (define/public (patch-instructions-instr instr)
@@ -1065,7 +1082,7 @@
            (Instr 'leaq (list a (Reg 'rax)))
            (Instr 'leaq (list (Reg 'rax) b)))]
         [(TailJmp a arity)
-         #:when (not (eq? a (Reg 'rax)))
+         #:when (not (equal? a (Reg 'rax)))
          (list
            (Instr 'movq (list a (Reg 'rax)))
            (TailJmp (Reg 'rax) arity))]
@@ -1088,103 +1105,104 @@
         [_ (list instr)]))
 
     (define/public (pass-patch-instructions p)
+      (define/match (patch-instructions-Def def)
+        [((Def name '() 'Integer info blocks))
+       
+         (Def name '() 'Integer info
+           (hash-map/copy blocks
+             (lambda (label block)
+               (values label
+                 (Block (Block-info block)
+                   (concat
+                     (map (lambda (x) (patch-instructions-instr x))
+                       (Block-instr* block))))))))])
+      
       (match p
         [(ProgramDefs info defs)
-
-         (define/match (patch-instructions-Def def)
-           [((Def name '() 'Integer info blocks))
-       
-            (Def name '() 'Integer info
-              (hash-map/copy blocks
-                (lambda (label block)
-                  (values label (Block (Block-info block) (concat (map (lambda (x) (patch-instructions-instr x)) (Block-instr* block))))))))])
-         
          (ProgramDefs info (map patch-instructions-Def defs))]))
 
-
     (define/public (pass-prelude-and-conclusion p)
+      (define/match (prelude-and-conclusion-Def p)
+        [((Def name '() 'Integer info blocks))
+      
+         (define used-callee-saved-registers (dict-ref info 'used-callee-saved-registers))
+         (define stack-variables-size (dict-ref info 'stack-variables-size))
+         (define (align-to-16 x)
+           (let ([rem (remainder x 16)])
+             (if (> rem 0)
+               (+ x (- 16 rem))
+               x)))
+      
+         (define stack-size
+           (let ([esr (* 8 (set-count used-callee-saved-registers))])
+             (- (align-to-16 (+ stack-variables-size esr)) esr)))
+      
+         (define esr-order (set->list used-callee-saved-registers))
+         (define save-registers
+           (map (lambda (r) (Instr 'pushq (list r))) esr-order))
+         (define restore-registers
+           (map (lambda (r) (Instr 'popq (list r))) (reverse esr-order)))
+      
+         (define initialize-root-stack
+           (concat
+             (for/list ([i (in-range (dict-ref info 'num-root-spills))])
+               (list
+                 (Instr 'movq (list (Imm 0) (Deref 'r15 0)))
+                 (Instr 'addq (list (Imm 8) (Reg 'r15)))))))
+      
+         (define finalize-root-stack
+           (let ([root-size (* 8 (dict-ref info 'num-root-spills))])
+             (if (> root-size 0)
+               (list (Instr 'subq (list (Imm root-size) (Reg 'r15))))
+               '())))
+      
+         (define initialize-gc
+           (list
+             (Instr 'movq (list (Imm 65536) (Reg 'rdi)))
+             (Instr 'movq (list (Imm 65536) (Reg 'rsi)))
+             (Callq 'initialize 2)
+             (Instr 'movq (list (Global 'rootstack_begin) (Reg 'r15)))))
+      
+         (define allocate-stack-variables
+           (if (> stack-size 0) (list (Instr 'subq (list (Imm stack-size) (Reg 'rsp)))) '()))
+         (define deallocate-stack-variables
+           (if (> stack-size 0) (list (Instr 'addq (list (Imm stack-size) (Reg 'rsp)))) '()))
+      
+         (define/match (transform-instr instr)
+           [((TailJmp f arity))
+            `(,@finalize-root-stack
+              ,@restore-registers
+              ,@deallocate-stack-variables
+              ,(Instr 'popq (list (Reg 'rbp)))
+              ,(IndirectJmp f))]
+           [(_) (list instr)])
+      
+         (set! blocks
+           (for/hash ([(label block) (in-dict blocks)])
+             (match block
+               [(Block info instrs) (values label (Block info (concat (map transform-instr instrs))))])))
+      
+         (dict-set* blocks
+           name
+           (Block '()
+             `(,(Instr 'pushq (list (Reg 'rbp)))
+               ,(Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
+               ,@allocate-stack-variables
+               ,@save-registers
+               ,@(if (equal? name 'main) initialize-gc '())
+               ,@initialize-root-stack
+               ,(Jmp (symbol-append name 'start))))
+                 
+           (symbol-append name 'conclusion)
+           (Block '()
+             `(,@finalize-root-stack
+               ,@restore-registers
+               ,@deallocate-stack-variables
+               ,(Instr 'popq (list (Reg 'rbp)))
+               ,(Retq))))])
+   
       (match p
         [(ProgramDefs info defs)
-   
-         (define/match (prelude-and-conclusion-Def p)
-           [((Def name '() 'Integer info blocks))
-      
-            (define used-callee-saved-registers (dict-ref info 'used-callee-saved-registers))
-            (define stack-variables-size (dict-ref info 'stack-variables-size))
-            (define (align-to-16 x)
-              (let ([rem (remainder x 16)])
-                (if (> rem 0)
-                  (+ x (- 16 rem))
-                  x)))
-      
-            (define stack-size
-              (let ([esr (* 8 (set-count used-callee-saved-registers))])
-                (- (align-to-16 (+ stack-variables-size esr)) esr)))
-      
-            (define esr-order (set->list used-callee-saved-registers))
-            (define save-registers
-              (map (lambda (r) (Instr 'pushq (list r))) esr-order))
-            (define restore-registers
-              (map (lambda (r) (Instr 'popq (list r))) (reverse esr-order)))
-      
-            (define initialize-root-stack
-              (concat
-                (for/list ([i (in-range (dict-ref info 'num-root-spills))])
-                  (list
-                    (Instr 'movq (list (Imm 0) (Deref 'r15 0)))
-                    (Instr 'addq (list (Imm 8) (Reg 'r15)))))))
-      
-            (define finalize-root-stack
-              (let ([root-size (* 8 (dict-ref info 'num-root-spills))])
-                (if (> root-size 0)
-                  (list (Instr 'subq (list (Imm root-size) (Reg 'r15))))
-                  '())))
-      
-            (define initialize-gc
-              (list
-                (Instr 'movq (list (Imm 65536) (Reg 'rdi)))
-                (Instr 'movq (list (Imm 65536) (Reg 'rsi)))
-                (Callq 'initialize 2)
-                (Instr 'movq (list (Global 'rootstack_begin) (Reg 'r15)))))
-      
-            (define allocate-stack-variables
-              (if (> stack-size 0) (list (Instr 'subq (list (Imm stack-size) (Reg 'rsp)))) '()))
-            (define deallocate-stack-variables
-              (if (> stack-size 0) (list (Instr 'addq (list (Imm stack-size) (Reg 'rsp)))) '()))
-      
-            (define/match (transform-instr instr)
-              [((TailJmp f arity))
-               `(,@finalize-root-stack
-                 ,@restore-registers
-                 ,@deallocate-stack-variables
-                 ,(Instr 'popq (list (Reg 'rbp)))
-                 ,(IndirectJmp f))]
-              [(_) (list instr)])
-      
-            (set! blocks
-              (for/hash ([(label block) (in-dict blocks)])
-                (match block
-                  [(Block info instrs) (values label (Block info (concat (map transform-instr instrs))))])))
-      
-            (dict-set* blocks
-              name
-              (Block '()
-                `(,(Instr 'pushq (list (Reg 'rbp)))
-                  ,(Instr 'movq (list (Reg 'rsp) (Reg 'rbp)))
-                  ,@allocate-stack-variables
-                  ,@save-registers
-                  ,@(if (eq? name 'main) initialize-gc '())
-                  ,@initialize-root-stack
-                  ,(Jmp (symbol-append name 'start))))
-                 
-              (symbol-append name 'conclusion)
-              (Block '()
-                `(,@finalize-root-stack
-                  ,@restore-registers
-                  ,@deallocate-stack-variables
-                  ,(Instr 'popq (list (Reg 'rbp)))
-                  ,(Retq))))])
-   
          (X86Program info (apply hash-union (map prelude-and-conclusion-Def defs)))]))
          
     (define/public (type-checker) type-check-Llambda)
@@ -1242,6 +1260,7 @@
         ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Llambda-prime ,type-check-Llambda)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Llambda-prime ,type-check-Llambda)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
+        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
         ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
         ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)

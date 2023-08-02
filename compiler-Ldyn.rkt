@@ -20,7 +20,7 @@
       set-filter
       pass-shrink pass-reveal-functions pass-convert-assignments pass-limit-functions
       pass-expose-allocation pass-uncover-get! pass-remove-complex-operands
-      pass-explicate-control pass-select-instructions pass-uncover-live
+      pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-patch-instructions pass-allocate-registers
       pass-prelude-and-conclusion)
     (super-new)
@@ -34,7 +34,7 @@
         ['Void #b101]))
 
     (define/override (gc-type? ty)
-      (if (eq? ty 'Any)
+      (if (equal? ty 'Any)
         #t
         (super gc-type? ty)))
          
@@ -120,155 +120,153 @@
                   ((uniquify-exp new-env) body))])))]))
 
     (define/public (pass-insert-casts p)
+      (define insert-casts-exp
+        (induct-L
+          (match-lambda
+            [(Int i) (Inject (Int i) 'Integer)]
+            [(Bool b) (Inject (Bool b) 'Boolean)]
+            [(FunRef f n) (Inject (FunRef f n) `(,@(for/list ([_ (in-range n)]) 'Any) -> Any))]
+            [(and exp (or (SetBang _ _) (Void)))
+             (Inject exp 'Void)]
+            [(Lambda `(,ps ...) _ body)
+             (Inject (Lambda (for/list ([p ps]) `(,p : Any)) 'Any body)
+                     `(,@(for/list ([_ ps]) 'Any) -> Any))]
+            [(Prim 'read '()) (Inject (Prim 'read '()) 'Integer)]
+            [(Prim (and op (or '+ '-)) args)
+             (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Integer)]
+            [(Prim (and op (or '< '<= '> '>=)) args)
+             (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Boolean)]
+            [(Prim 'eq? args)
+             (Inject (Prim 'eq? args) 'Boolean)]
+            [(Prim (and op (or 'and 'or)) args)
+             (Inject (Prim op (for/list ([a args]) (Project a 'Boolean))) 'Boolean)]
+            [(Prim 'vector-ref (list v i))
+             (Prim 'any-vector-ref (list v (Project i 'Integer)))]
+            [(Prim 'vector-set! (list v i e))
+             (Prim 'any-vector-set! (list v (Project i 'Integer) e))]
+            [(Prim 'vector args)
+             (Inject (Prim 'vector args) `(Vector ,@(for/list ([_ args]) 'Any)))]
+            [(Prim 'vector-length args)
+             (Inject (Prim 'any-vector-length args) 'Integer)]
+            [(Prim 'procedure-arity (list f))
+             (define f-var (gensym 'procedure-arity.f.))
+             (Let f-var f
+               (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var f-var)))
+                                    (Int (type-tag '(-> Integer)))))
+                 (Inject (Prim 'procedure-arity (list (ValueOf (Var f-var) '(-> Integer))))
+                         'Integer)
+                 (Exit)))]
+            [(Apply f args)
+             (Apply (Project f `(,@(for/list ([_ args]) 'Any) -> Any)) args)]
+            [(If c t e)
+             (If (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))
+                 e
+                 t)]
+            [(Prim 'not (list a))
+             (If (Prim 'eq? (list a (Inject (Bool #f) 'Boolean)))
+               (Inject (Bool #t) 'Boolean)
+               (Inject (Bool #f) 'Boolean))]
+            [(WhileLoop c e)
+             (Inject
+               (WhileLoop
+                 (Prim 'not (list (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))))
+                 e)
+               'Void)]
+            [(Prim (and op (or 'boolean? 'integer? 'vector? 'procedure? 'void?)) args)
+             (Inject (Prim op args) 'Boolean)]
+            [exp exp])))
+   
+      (define/match (insert-casts-Def def)
+        [((Def name params _ info body))
+         (Def
+           name
+           (for/list ([p params]) `(,p : Any))
+           (if (equal? name 'main) 'Integer 'Any)
+           info
+           (if (equal? name 'main)
+             (Project (insert-casts-exp body) 'Integer)
+             (insert-casts-exp body)))])
+   
       (match p
         [(ProgramDefs info defs)
-   
-         (define insert-casts-exp
-           (induct-L
-             (match-lambda
-               [(Int i) (Inject (Int i) 'Integer)]
-               [(Bool b) (Inject (Bool b) 'Boolean)]
-               [(FunRef f n) (Inject (FunRef f n) `(,@(for/list ([_ (in-range n)]) 'Any) -> Any))]
-               [(and exp (or (SetBang _ _) (Void)))
-                (Inject exp 'Void)]
-               [(Lambda `(,ps ...) _ body)
-                (Inject (Lambda (for/list ([p ps]) `(,p : Any)) 'Any body)
-                        `(,@(for/list ([_ ps]) 'Any) -> Any))]
-               [(Prim 'read '()) (Inject (Prim 'read '()) 'Integer)]
-               [(Prim (and op (or '+ '-)) args)
-                (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Integer)]
-               [(Prim (and op (or '< '<= '> '>=)) args)
-                (Inject (Prim op (for/list ([a args]) (Project a 'Integer))) 'Boolean)]
-               [(Prim 'eq? args)
-                (Inject (Prim 'eq? args) 'Boolean)]
-               [(Prim (and op (or 'and 'or)) args)
-                (Inject (Prim op (for/list ([a args]) (Project a 'Boolean))) 'Boolean)]
-               [(Prim 'vector-ref (list v i))
-                (Prim 'any-vector-ref (list v (Project i 'Integer)))]
-               [(Prim 'vector-set! (list v i e))
-                (Prim 'any-vector-set! (list v (Project i 'Integer) e))]
-               [(Prim 'vector args)
-                (Inject (Prim 'vector args) `(Vector ,@(for/list ([_ args]) 'Any)))]
-               [(Prim 'vector-length args)
-                (Inject (Prim 'any-vector-length args) 'Integer)]
-               [(Prim 'procedure-arity (list f))
-                (define f-var (gensym 'procedure-arity.f.))
-                (Let f-var f
-                  (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var f-var)))
-                                       (Int (type-tag '(-> Integer)))))
-                    (Inject (Prim 'procedure-arity (list (ValueOf (Var f-var) '(-> Integer))))
-                            'Integer)
-                    (Exit)))]
-               [(Apply f args)
-                (Apply (Project f `(,@(for/list ([_ args]) 'Any) -> Any)) args)]
-               [(If c t e)
-                (If (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))
-                    e
-                    t)]
-               [(Prim 'not (list a))
-                (If (Prim 'eq? (list a (Inject (Bool #f) 'Boolean)))
-                  (Inject (Bool #t) 'Boolean)
-                  (Inject (Bool #f) 'Boolean))]
-               [(WhileLoop c e)
-                (Inject
-                  (WhileLoop
-                    (Prim 'not (list (Prim 'eq? (list c (Inject (Bool #f) 'Boolean)))))
-                    e)
-                  'Void)]
-               [(Prim (and op (or 'boolean? 'integer? 'vector? 'procedure? 'void?)) args)
-                (Inject (Prim op args) 'Boolean)]
-               [exp exp])))
-   
-         (define/match (insert-casts-Def def)
-           [((Def name params _ info body))
-            (Def
-              name
-              (for/list ([p params]) `(,p : Any))
-              (if (eq? name 'main) 'Integer 'Any)
-              info
-              (if (eq? name 'main)
-                (Project (insert-casts-exp body) 'Integer)
-                (insert-casts-exp body)))])
-   
          (ProgramDefs info (map insert-casts-Def defs))]))
   
     (define/public (pass-reveal-casts p)
+      (define type-pred->type-tag
+        (hash
+          'boolean? (type-tag 'Boolean)
+          'integer? (type-tag 'Integer)
+          'vector? (type-tag '(Vector))
+          'procedure? (type-tag '(-> _))
+          'void? (type-tag 'Void)))
+   
+      (define reveal-casts-exp
+        (induct-L
+          (match-lambda
+            [(Project e ty)
+             (define tmp-var (gensym 'project.))
+             (Let tmp-var e
+               (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var tmp-var)))
+                                    (Int (type-tag ty))))
+                 (match ty
+                   [`(Vector ,ts ...)
+                    (define vec-var (gensym 'vector.))
+                    (Let vec-var (ValueOf (Var tmp-var) ty)
+                      (If (Prim 'eq? (list (Prim 'vector-length (list (Var vec-var))) (Int (length ts))))
+                        (Var vec-var)
+                        (Exit)))]
+                   [`(,ts ... -> ,_)
+                    (define clos-var (gensym 'closure.))
+                    (Let clos-var (ValueOf (Var tmp-var) ty)
+                      (If (Prim 'eq? (list (Prim 'procedure-arity (list (Var clos-var))) (Int (length ts))))
+                        (Var clos-var)
+                        (Exit)))]
+                   [_ (ValueOf (Var tmp-var) ty)])
+                 (Exit)))]
+            [(Inject e ty)
+             (Prim 'make-any (list e (Int (type-tag ty))))]
+            [(Prim op (list e))
+             #:when (dict-has-key? type-pred->type-tag op)
+             (Prim 'eq? (list (Prim 'tag-of-any (list e)) (Int (dict-ref type-pred->type-tag op))))]
+            [(Prim 'any-vector-ref (list v i))
+             (define v-var (gensym 'any-vector-ref.vector.))
+             (define i-var (gensym 'any-vector-ref.index.))
+             (Let v-var v
+               (Let i-var i
+                 (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                      (Int (type-tag '(Vector)))))
+                   (If (Prim '< (list (Var i-var)
+                                      (Prim 'any-vector-length (list (Var v-var)))))
+                     (Prim 'any-vector-ref (list (Var v-var) (Var i-var)))
+                     (Exit))
+                   (Exit))))]
+            [(Prim 'any-vector-length (list v))
+             (define v-var (gensym 'any-vector-length.vector.))
+             (Let v-var v
+               (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                    (Int (type-tag '(Vector)))))
+                 (Prim 'any-vector-length (list (Var v-var)))
+                 (Exit)))]
+            [(Prim 'any-vector-set! (list v i e))
+             (define v-var (gensym 'any-vector-set!.vector.))
+             (define i-var (gensym 'any-vector-set!.index.))
+             (Let v-var v
+               (Let i-var i
+                 (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
+                                      (Int (type-tag '(Vector)))))
+                   (If (Prim '< (list (Var i-var)
+                                      (Prim 'any-vector-length (list (Var v-var)))))
+                     (Prim 'any-vector-set! (list (Var v-var) (Var i-var) e))
+                     (Exit))
+                   (Exit))))]
+            [exp exp])))
+   
+      (define/match (reveal-casts-Def def)
+        [((Def name params rty info body))
+         (Def name params rty info (reveal-casts-exp body))])
+   
       (match p
         [(ProgramDefs info defs)
-   
-         (define type-pred->type-tag
-           (hash
-             'boolean? (type-tag 'Boolean)
-             'integer? (type-tag 'Integer)
-             'vector? (type-tag '(Vector))
-             'procedure? (type-tag '(-> _))
-             'void? (type-tag 'Void)))
-   
-         (define reveal-casts-exp
-           (induct-L
-             (match-lambda
-               [(Project e ty)
-                (define tmp-var (gensym 'project.))
-                (Let tmp-var e
-                  (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var tmp-var)))
-                                       (Int (type-tag ty))))
-                    (match ty
-                      [`(Vector ,ts ...)
-                       (define vec-var (gensym 'vector.))
-                       (Let vec-var (ValueOf (Var tmp-var) ty)
-                         (If (Prim 'eq? (list (Prim 'vector-length (list (Var vec-var))) (Int (length ts))))
-                           (Var vec-var)
-                           (Exit)))]
-                      [`(,ts ... -> ,_)
-                       (define clos-var (gensym 'closure.))
-                       (Let clos-var (ValueOf (Var tmp-var) ty)
-                         (If (Prim 'eq? (list (Prim 'procedure-arity (list (Var clos-var))) (Int (length ts))))
-                           (Var clos-var)
-                           (Exit)))]
-                      [_ (ValueOf (Var tmp-var) ty)])
-                    (Exit)))]
-               [(Inject e ty)
-                (Prim 'make-any (list e (Int (type-tag ty))))]
-               [(Prim op (list e))
-                #:when (dict-has-key? type-pred->type-tag op)
-                (Prim 'eq? (list (Prim 'tag-of-any (list e)) (Int (dict-ref type-pred->type-tag op))))]
-               [(Prim 'any-vector-ref (list v i))
-                (define v-var (gensym 'any-vector-ref.vector.))
-                (define i-var (gensym 'any-vector-ref.index.))
-                (Let v-var v
-                  (Let i-var i
-                    (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
-                                         (Int (type-tag '(Vector)))))
-                      (If (Prim '< (list (Var i-var)
-                                         (Prim 'any-vector-length (list (Var v-var)))))
-                        (Prim 'any-vector-ref (list (Var v-var) (Var i-var)))
-                        (Exit))
-                      (Exit))))]
-               [(Prim 'any-vector-length (list v))
-                (define v-var (gensym 'any-vector-length.vector.))
-                (Let v-var v
-                  (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
-                                       (Int (type-tag '(Vector)))))
-                    (Prim 'any-vector-length (list (Var v-var)))
-                    (Exit)))]
-               [(Prim 'any-vector-set! (list v i e))
-                (define v-var (gensym 'any-vector-set!.vector.))
-                (define i-var (gensym 'any-vector-set!.index.))
-                (Let v-var v
-                  (Let i-var i
-                    (If (Prim 'eq? (list (Prim 'tag-of-any (list (Var v-var)))
-                                         (Int (type-tag '(Vector)))))
-                      (If (Prim '< (list (Var i-var)
-                                         (Prim 'any-vector-length (list (Var v-var)))))
-                        (Prim 'any-vector-set! (list (Var v-var) (Var i-var) e))
-                        (Exit))
-                      (Exit))))]
-               [exp exp])))
-   
-         (define/match (reveal-casts-Def def)
-           [((Def name params rty info body))
-            (Def name params rty info (reveal-casts-exp body))])
-   
          (ProgramDefs info (map reveal-casts-Def defs))]))
 
     (define/override (pass-convert-closures p)
@@ -432,6 +430,7 @@
         ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Lany-prime ,type-check-Lany)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lany-prime ,type-check-Lany)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany ,type-check-Cany)
+        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany ,type-check-Cany)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
         ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
         ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)

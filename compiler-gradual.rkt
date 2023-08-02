@@ -16,7 +16,7 @@
       pass-shrink pass-uniquify pass-reveal-functions pass-reveal-casts
       pass-convert-assignments pass-convert-closures pass-limit-functions
       pass-expose-allocation pass-uncover-get! pass-remove-complex-operands
-      pass-explicate-control pass-select-instructions pass-uncover-live
+      pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-allocate-registers pass-patch-instructions
       pass-prelude-and-conclusion
       explicate-assign select-instructions-atom)
@@ -97,17 +97,16 @@
           (match-lambda
             [(Cast e s t) (apply-cast e s t)]
             [exp exp])))
+   
+      (define/match (lower-casts-Def def)     
+        [((Def name params rty info body))
+         (Def name params rty info (lower-casts-exp body))])
 
       (match p
         [(Program info exp)
          (Program info (lower-casts-exp exp))]
              
         [(ProgramDefsExp info defs exp)
-   
-         (define/match (lower-casts-Def def)     
-           [((Def name params rty info body))
-            (Def name params rty info (lower-casts-exp body))])
-
          (ProgramDefsExp info (map lower-casts-Def defs) (lower-casts-exp exp))]))
 
     (define/public (pass-differentiate-proxies p)
@@ -154,23 +153,22 @@
                body)]
             [exp exp])))
    
+      (define/match (differentiate-proxies-Def def)     
+        [((Def name params rty info body))
+         (Def
+           name
+           (for/list ([p params])
+             (match p
+               [`(,x : ,t) `(,x : ,(differentiate-proxies-type t))]))
+           (differentiate-proxies-type rty)
+           info
+           (differentiate-proxies-exp body))])
+   
       (match p
         [(Program info exp) 
          (Program info (differentiate-proxies-exp exp))]
              
         [(ProgramDefsExp info defs exp)
-   
-         (define/match (differentiate-proxies-Def def)     
-           [((Def name params rty info body))
-            (Def
-              name
-              (for/list ([p params])
-                (match p
-                  [`(,x : ,t) `(,x : ,(differentiate-proxies-type t))]))
-              (differentiate-proxies-type rty)
-              info
-              (differentiate-proxies-exp body))])
-
          (ProgramDefsExp info (map differentiate-proxies-Def defs) (differentiate-proxies-exp exp))]))
          
     (define/override (uniquify-exp env)
@@ -293,6 +291,7 @@
         ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Lcast-prime ,type-check-Lany-proxy)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lcast-prime ,type-check-Lany-proxy)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
+        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-5)
         ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-5)
         ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-5)
