@@ -605,24 +605,22 @@
         (for/hash ([(label tail) (in-dict blocks)])
           (values label (rewrite-jumps tail))))
         
-      (define (remove-orphans defname blocks)
-        (define cfg (make-multigraph '()))
-        (for ([(label tail) (in-dict blocks)])
-          (add-vertex! cfg label)
-          (for ([target (in-set (collect-jumps tail))])
-            (add-directed-edge! cfg label target)))
-        (define orphans
-          (let ([cfg-t (transpose cfg)])
-            (for/set ([label (in-dict-keys blocks)]
-                      #:when (and (not (equal? (symbol-append defname 'start) label))
-                                  (stream-empty? (in-neighbors cfg-t label))))
-              label)))
-        (for/fold ([blocks blocks]) ([label (in-set orphans)])
-          (dict-remove blocks label)))
+      (define (remove-dead-blocks defname blocks)
+        (define alive (set))
+        (define frontier (set (symbol-append defname 'start)))
+        (while (not (set-empty? frontier))
+          (set! alive (set-union alive frontier))
+          (set! frontier
+            (set-subtract
+              (for/fold ([frontier (set)]) ([label (in-set frontier)])
+                (set-union frontier (collect-jumps (dict-ref blocks label))))
+              alive)))
+        (for/hash ([label (in-set alive)])
+          (values label (dict-ref blocks label))))
         
       (define/match (optimize-blocks-Def def)
         [((Def name params rty info blocks))
-         (Def name params rty info (remove-orphans name (remove-duplicate-blocks blocks)))])
+         (Def name params rty info (remove-dead-blocks name (remove-duplicate-blocks blocks)))])
          
       (match p
         [(ProgramDefs info defs)
