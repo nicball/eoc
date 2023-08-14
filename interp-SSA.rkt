@@ -1,26 +1,39 @@
 #! /usr/bin/env -S nix shell nixpkgs#racket --command racket
 #lang racket
-;; op := add sub neg id? call mul and or sal sar xor cmp funcaddr
-;;       store load
+;; op := add sub neg id call indirect_call mul and or sal sar xor cmp
+;;       load_global func_addr load allocate
+;;       store collect
 ;;       return jmp branch tailcall
-;; arg := int global var
+;; arg := int var
 ;; instr := (var op (arg ...))
 ;;          (phi ((label . var) ...))
 
+;; function main()
+;; .start
+;; a1 = id 1
+;; a2 = id 2
+;; cond = call random()
 ;; x = add a1 a2
 ;; br (eq? cond 1) .then .else
 ;; 
 ;; .then
-;; x = add x a1
+;; x2 = add x a1
 ;; jmp .end
 ;; 
 ;; .else
-;; x = add x a2
+;; x3 = add x a2
 ;; jmp .end
 ;; 
 ;; .end
-;; x = phi x x
-;; ret x
+;; x4 = phi .then x2 .else x3
+;; vec = allocate 8
+;; store x4 vec 0
+;; v = load vec 0
+;; return v
+
+;; function random()
+;; .start
+;; return 0
 
 (require "utilities.rkt")
 
@@ -29,6 +42,7 @@
 (struct SsaInstr [var op arg*])
 (struct Phi [var source*])
 (struct Branch [cc arg1 arg2 then else])
+(struct Store [val base offset])
 
 (define example-program
   (SsaProgram '()
@@ -40,30 +54,33 @@
             (list
               (SsaInstr 'a1 'id (list (Int 1)))
               (SsaInstr 'a2 'id (list (Int 2)))
-              (SsaInstr 'cond 'call (list (Global 'random)))
+              (SsaInstr 'cond 'call (list 'random))
               (SsaInstr 'x 'add (list (Var 'a1) (Var 'a2)))
               (Branch 'eq? (Var 'cond) (Int 1) 'then 'else)))
           'then
           (SsaBlock '()
             (list
-              (SsaInstr 'x 'add (list (Var 'x) (Var 'a1)))
+              (SsaInstr 'x2 'add (list (Var 'x) (Var 'a1)))
               (Jmp 'end)))
           'else
           (SsaBlock '()
             (list
-              (SsaInstr 'x 'add (list (Var 'x) (Var 'a2)))
+              (SsaInstr 'x3 'add (list (Var 'x) (Var 'a2)))
               (Jmp 'end)))
           'end
           (SsaBlock '()
             (list
-              (Phi 'x `((then . ,(Var 'x)) (else . ,(Var 'x))))
-              (Return (Var 'x))))))
+              (Phi 'x4 `((then . ,(Var 'x2)) (else . ,(Var 'x3))))
+              (SsaInstr 'vec 'allocate (list (Int 8)))
+              (Store (Var 'x4) (Var 'vec) 0)
+              (SsaInstr 'v 'load (list (Var 'vec) (Int 0)))
+              (Return (Var 'v))))))
       (Def 'random '() 'Integer '()
         (hash
           'start
           (SsaBlock '()
             (list
-              (Return (Int 1)))))))))
+              (Return (Int 0)))))))))
 
 (define interp-SSA-class
   (class object%
@@ -121,7 +138,33 @@
          #:when (dict-has-key? unary-ops op)
          (define a-val (interp-exp env a))
          (interp-instrs (dict-set env x ((dict-ref unary-ops op) a-val)) rest)]
-        [(cons (SsaInstr x 'call (cons f args)) rest)
+        [(cons (SsaInstr x 'func_addr (list name)) rest)
+         (interp-instrs (dict-set env x name) rest)]
+        [(cons (SsaInstr x 'load_global (list name)) rest)
+         (define val
+           (match name
+             ['free_ptr 0]
+             ['fromspace_end 640000]))
+         (interp-instrs (dict-set env x val) rest)]
+        [(cons (SsaInstr x 'load (list a (Int offset))) rest)
+         (define addr (+ (interp-exp env a) offset))
+         (define val (read-memory addr))
+         (interp-instrs (dict-set env x val) rest)]
+        [(cons (SsaInstr x 'allocate (list (Int size))) rest)
+         (define val (allocate-memory! size))
+         (interp-instrs (dict-set env x val) rest)] 
+        [(cons (Store v base offset) rest)
+         (define val (interp-exp env v))
+         (define addr (+ (interp-exp env base) offset))
+         (write-memory! addr val)
+         (interp-instrs env rest)]
+        [(cons (Collect _) rest)
+         (interp-instrs env rest)]
+        [(cons (SsaInstr x 'call (cons name args)) rest)
+         (define arg-vals (for/list ([a args]) (interp-exp env a)))
+         (define ret (call-function name arg-vals))
+         (interp-instrs (dict-set env x ret) rest)]
+        [(cons (SsaInstr x 'indirectcall (cons f args)) rest)
          (define name (interp-exp env f))
          (define arg-vals (for/list ([a args]) (interp-exp env a)))
          (define ret (call-function name arg-vals))
@@ -130,7 +173,7 @@
          (define a-val (interp-exp env a))
          (define b-val (interp-exp env b))
          (define res (interp-cmp op a-val b-val))
-         (interp-exp (dict-set env x res) rest)]
+         (interp-instrs (dict-set env x res) rest)]
         [(cons (Return v) rest)
          (interp-exp env v)]
         [(cons (Jmp label) rest)
@@ -152,8 +195,7 @@
     (define (interp-exp env exp)
       (match exp
         [(Var x) (dict-ref env x)]
-        [(Int n) n]
-        [(Global x) x])) ; todo gc
+        [(Int n) n]))
 
     (define binary-ops
       (hash
@@ -169,9 +211,8 @@
     (define unary-ops
       (hash
         'neg -
-        'id (lambda (x) x)
-        'funcaddr (lambda (x) x)))
-
+        'id (lambda (x) x)))
+         
     (define (interp-cmp op a b)
       (define op-fn
         (match op
@@ -189,6 +230,39 @@
         (set! label-history (take label-history 2))))
     (define (get-last-block)
       (assert "dangling phi node" (equal? (length label-history) 2))
-      (second label-history))))
+      (second label-history))
+
+    (define max-memory-addr 0)
+         
+    (define memory-objects (make-hash))
+         
+    (define (allocate-memory! size)
+      (define ptr (+ max-memory-addr 100))
+      (set! max-memory-addr (+ ptr size))
+      (define num-elem (/ size 8))
+      (define v (make-vector num-elem #f))
+      (dict-set! memory-objects ptr (list size v))
+      ptr)
+
+    (define (read-memory ptr)
+      (define val #f)
+      (for ([(base alloc) (in-dict memory-objects)]
+            #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
+        #:final #t
+        (define index (/ (- ptr base) 8))
+        (set! val (vector-ref (cadr alloc) index)))
+      (assert "memory read invalid" val)
+      val)
+
+    (define (write-memory! ptr val)
+      (define written #f)
+      (for ([(base alloc) (in-dict memory-objects)]
+            #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
+        #:final #t
+        (define index (/ (- ptr base) 8))
+        (vector-set! (cadr alloc) index val)
+        (set! written #t))
+      (assert "memory write invalid" written)
+      val)))
 
 (send (new interp-SSA-class) interp-program example-program)
