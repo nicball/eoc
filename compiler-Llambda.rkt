@@ -8,6 +8,7 @@
 (require "type-check-Llambda.rkt")
 (require "type-check-Clambda.rkt")
 (require "utilities.rkt")
+(require "interp-SSA.rkt")
 (require "interp.rkt")
 (require graph)
 (require "priority_queue.rkt")
@@ -625,19 +626,13 @@
       (match p
         [(ProgramDefs info defs)
          (ProgramDefs info (map optimize-blocks-Def defs))]))
-
-    (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
-         
-    (define cmp->cc
-      '((eq? . e) (< . l) (<= . le) (> . g) (>= . ge)))
       
     (define/public (select-instructions-atom atom)
       (match atom
-        [(Int i) (Imm i)]
-        [(Bool b) (if b (Imm 1) (Imm 0))]
+        [(Int i) (Int i)]
+        [(Bool b) (if b (Int 1) (Int 0))]
         [(Var x) (Var x)]
-        [(Void) (Imm 0)]
-        [(GlobalValue x) (Global x)]))
+        [(Void) (Int 0)]))
            
     (define/public (select-instructions-stmt s)
       (define (vector-offset n) (* 8 (+ 1 n)))
@@ -659,127 +654,91 @@
            (arithmetic-shift arity 58))])
 
       (match s
-        [(Assign x (FunRef name _))
+        [(Assign (Var x) (GlobalValue name))
          (list
-           (Instr 'leaq (list (Global name) x)))]
-        [(Assign x (Call f args))
-         (append
-           (for/list ([a args] [r (argument-passing-registers)])
-             (Instr 'movq (list (select-instructions-atom a) r)))
-           (list
-             (IndirectCallq (select-instructions-atom f) (length args))
-             (Instr 'movq (list (Reg 'rax) x))))]
-        [(Assign x (Prim 'vector-ref (list v (Int n))))
+           (SsaInstr x 'load_global (list name)))]
+        [(Assign (Var x) (FunRef name _))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'r11)))
-           (Instr 'movq (list (Deref 'r11 (vector-offset n)) x)))]
-        [(Assign x (Prim 'vector-set! (list v (Int n) e)))
+           (SsaInstr x 'func_addr (list name)))]
+        [(Assign (Var x) (Call f args))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'r11)))
-           (Instr 'movq (list (select-instructions-atom e) (Deref 'r11 (vector-offset n))))
-           (Instr 'movq (list (Imm 0) x)))]
-        [(Assign x (Prim 'vector-length (list v)))
+           (SsaInstr x 'indirectcall (map (lambda (x) (select-instructions-atom x)) (cons f args))))]
+        [(Assign (Var x) (Prim 'vector-ref (list v (Int n))))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'r11)))
-           (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
-           (Instr 'sarq (list (Imm 1) (Reg 'rax)))
-           (Instr 'andq (list (Imm 63) (Reg 'rax)))
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Allocate n (list 'Vector elem-types ...)))
+           (SsaInstr x 'load (list (select-instructions-atom v) (Int (vector-offset n)))))]
+        [(Assign (Var x) (Prim 'vector-set! (list v (Int n) e)))
          (list
-           (Instr 'movq (list (Global 'free_ptr) (Reg 'r11)))
-           (Instr 'addq (list (Imm (vector-offset n)) (Global 'free_ptr)))
-           (Instr 'movq (list (Imm (vector-tag elem-types)) (Reg 'rax)))
-           (Instr 'movq (list (Reg 'rax) (Deref 'r11 0)))
-           (Instr 'movq (list (Reg 'r11) x)))]
-        [(Assign x (AllocateClosure n type arity))
+           (Store (select-instructions-atom e) (select-instructions-atom v) (Int (vector-offset n)))
+           (SsaInstr x 'id (list (Int 0))))]
+        [(Assign (Var x) (Prim 'vector-length (list v)))
          (list
-           (Instr 'movq (list (Global 'free_ptr) (Reg 'r11)))
-           (Instr 'addq (list (Imm (vector-offset n)) (Global 'free_ptr)))
-           (Instr 'movq (list (Imm (closure-tag type)) (Reg 'rax)))
-           (Instr 'movq (list (Reg 'rax) (Deref 'r11 0)))
-           (Instr 'movq (list (Reg 'r11) x)))]
-        [(Assign x (Prim 'procedure-arity (list c)))
+           (SsaInstr x 'load (list (select-instructions-atom v) (Int 0)))
+           (SsaInstr x 'sar (list (Int 1) (Var x)))
+           (SsaInstr x 'and (list (Int 63) (Var x))))]
+        [(Assign (Var x) (Allocate n (list 'Vector elem-types ...)))
          (list
-           (Instr 'movq (list (select-instructions-atom c) (Reg 'r11)))
-           (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
-           (Instr 'sarq (list (Imm 58) (Reg 'rax)))
-           (Instr 'andq (list (Imm 31) (Reg 'rax)))
-           (Instr 'movq (list (Reg 'rax) x)))]
+           (SsaInstr x 'allocate (list (Int (vector-offset n))))
+           (Store (Int (vector-tag elem-types)) (Var x) (Int 0)))]
+        [(Assign (Var x) (AllocateClosure n type arity))
+         (list
+           (SsaInstr x 'allocate (list (Int (vector-offset n))))
+           (Store (Int (closure-tag type)) (Var x) (Int 0)))]
+        [(Assign (Var x) (Prim 'procedure-arity (list c)))
+         (list
+           (SsaInstr x 'load (list (select-instructions-atom c) (Int 0)))
+           (SsaInstr x 'sar (list (Int 58) (Var x)))
+           (SsaInstr x 'and (list (Int 31) (Var x))))]
         [(Collect n)
          (list
-           (Instr 'movq (list (Reg 'r15) (Reg 'rdi)))
-           (Instr 'movq (list (Imm n) (Reg 'rsi)))
-           (Callq 'collect 2))]
+           (Collect n))]
         [(Prim 'vector-set! (list v (Int n) e))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'r11)))
-           (Instr 'movq (list (select-instructions-atom e) (Deref 'r11 (vector-offset n)))))]
-        [(Assign x (Prim 'read '())) (list (Callq 'read_int 0) (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim '- (list a)))
-         (if (equal? x a)
-           (list (Instr 'negq (list a)))
-           (list (Instr 'movq (list (select-instructions-atom a) x)) (Instr 'negq (list x))))]
-        [(Assign x (Prim '- (list a b)))
-         (if (equal? x a)
-           (list (Instr 'subq (list (select-instructions-atom b) a)))
-           (list (Instr 'movq (list (select-instructions-atom a) x)) (Instr 'subq (list (select-instructions-atom b) x))))]
-        [(Assign x (Prim '+ (list a b)))
-         (cond
-          [(equal? x a) (list (Instr 'addq (list (select-instructions-atom b) a)))]
-          [(equal? x b) (list (Instr 'addq (list (select-instructions-atom a) b)))]
-          [else (list (Instr 'movq (list (select-instructions-atom a) x)) (Instr 'addq (list (select-instructions-atom b) x)))])]
-        [(Assign x (Prim 'not (list a)))
-         (if (equal? x a)
-           (list (Instr 'xorq (list (Imm 1) x)))
-           (list (Instr 'movq (list (select-instructions-atom a) x)) (Instr 'xorq (list (Imm 1) x))))]
-        [(Assign x (Prim op (list a b)))
-         #:when (dict-has-key? cmp->cc op)
-         (list
-           (Instr 'cmpq (list (select-instructions-atom b) (select-instructions-atom a)))
-           (Instr 'set (list (dict-ref cmp->cc op) (ByteReg 'al)))
-           (Instr 'movzbq (list (ByteReg 'al) x)))]
-        [(Assign x atom) (list (Instr 'movq (list (select-instructions-atom atom) x)))]
-        [(Prim 'read '()) (list (Callq 'read_int 0))]))
+           (Store (select-instructions-atom e) (select-instructions-atom v) (Int (vector-offset n))))]
+        [(Assign (Var x) (Prim 'read '()))
+         (list (SsaInstr x 'call (list 'read_int)))]
+        [(Assign (Var x) (Prim '- (list a)))
+         (list (SsaInstr x 'neg (list (select-instructions-atom a))))]
+        [(Assign (Var x) (Prim '- (list a b)))
+         (list (SsaInstr x 'sub (list (select-instructions-atom a) (select-instructions-atom b))))]
+        [(Assign (Var x) (Prim '+ (list a b)))
+         (list (SsaInstr x 'add (list (select-instructions-atom a) (select-instructions-atom b))))]
+        [(Assign (Var x) (Prim 'not (list a)))
+         (list (SsaInstr x 'xor (list (Int 1) x)))]
+        [(Assign (Var x) (Prim op (list a b)))
+         #:when (set-member? '(eq? < <= > >=) op)
+         (list (SsaInstr x 'cmp (list op (select-instructions-atom a) (select-instructions-atom b))))]
+        [(Assign (Var x) atom) (list (SsaInstr x 'id (list (select-instructions-atom atom))))]
+        [(Prim 'read '()) (list (SsaInstr (gensym 'unused.) 'call (list 'read_int)))]))
       
-    (define/public (select-instructions-tail name tail)
+    (define/public (select-instructions-tail tail)
       (match tail
         [(TailCall f args)
-         (append
-           (for/list ([a args] [r (argument-passing-registers)])
-             (Instr 'movq (list (select-instructions-atom a) r)))
-           (list
-             (TailJmp (select-instructions-atom f) (length args))))]
+         (list (TailCall (select-instructions-atom f) (map (lambda (x) (select-instructions-atom x)) args)))]
         [(Goto label) (list (Jmp label))]
         [(IfStmt (Prim op (list a b)) (Goto then-label) (Goto else-label))
-         (list
-           (Instr 'cmpq (list (select-instructions-atom b) (select-instructions-atom a)))
-           (JmpIf (dict-ref cmp->cc op) then-label)
-           (Jmp else-label))]
-        [(Return e) (append (select-instructions-stmt (Assign (Reg 'rax) e)) (list (Jmp (symbol-append name 'conclusion))))]
-        [(Seq stmt tail) (append (select-instructions-stmt stmt) (select-instructions-tail name tail))]))
+         (list (Branch op (select-instructions-atom a) (select-instructions-atom b) then-label else-label))]
+        [(Return e)
+         (define var (gensym 'retval.))
+         (append
+          (select-instructions-stmt (Assign (Var var) e))
+          (list (Return (Var var))))]
+        [(Seq stmt tail) (append (select-instructions-stmt stmt) (select-instructions-tail tail))]))
       
     (define/public (pass-select-instructions p)
       (define/match (select-instructions-Def p)
         [((Def name params _ info blocks))
-      
-         (define copy-arguments
-           (for/list ([p params] [r (argument-passing-registers)])
-             (Instr 'movq (list r (Var (car p))))))
-      
-         (Def name '() 'Integer
-           (dict-set* info 'num-root-spills 0 'num-params (length params))
-           (hash-map/copy blocks 
-             (lambda (label block)
-               (values label
-                 (Block '()
-                   (if (equal? label (symbol-append name 'start))
-                     (append copy-arguments (select-instructions-tail name block))
-                     (select-instructions-tail name block)))))))])
+         (Def name (map car params) 'Integer info
+           (for/hash ([(label tail) (in-dict blocks)])
+             (values label (SsaBlock '() (select-instructions-tail tail)))))])
    
       (match p
         [(ProgramDefs info defs)
          (ProgramDefs info (map select-instructions-Def defs))]))
+
+    (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
+         
+    (define cmp->cc
+      '((eq? . e) (< . l) (<= . le) (> . g) (>= . ge)))
 
     (define/public (location? atom)
       (match atom
@@ -1259,12 +1218,12 @@
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Llambda-prime ,type-check-Llambda)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
-        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
-        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
-        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
-        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
-        ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)))))
+        ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
+        ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
+        ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
+        ;("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
+        ;("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
 
 (module* main #f
-  (send (new compiler-Llambda) run-tests #t))
+  (send (new compiler-Llambda) run-tests #f))

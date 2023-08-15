@@ -8,79 +8,10 @@
 ;; instr := (var op (arg ...))
 ;;          (phi ((label . var) ...))
 
-;; function main()
-;; .start
-;; a1 = id 1
-;; a2 = id 2
-;; cond = call random()
-;; x = add a1 a2
-;; br (eq? cond 1) .then .else
-;; 
-;; .then
-;; x2 = add x a1
-;; jmp .end
-;; 
-;; .else
-;; x3 = add x a2
-;; jmp .end
-;; 
-;; .end
-;; x4 = phi .then x2 .else x3
-;; vec = allocate 8
-;; store x4 vec 0
-;; v = load vec 0
-;; return v
-
-;; function random()
-;; .start
-;; return 0
+(provide
+  interp-SSA-class interp-SSA)
 
 (require "utilities.rkt")
-
-(struct SsaProgram [info def*])
-(struct SsaBlock [info instr*])
-(struct SsaInstr [var op arg*])
-(struct Phi [var source*])
-(struct Branch [cc arg1 arg2 then else])
-(struct Store [val base offset])
-
-(define example-program
-  (SsaProgram '()
-    (list
-      (Def 'main '() 'Integer '()
-        (hash
-          'start
-          (SsaBlock '()
-            (list
-              (SsaInstr 'a1 'id (list (Int 1)))
-              (SsaInstr 'a2 'id (list (Int 2)))
-              (SsaInstr 'cond 'call (list 'random))
-              (SsaInstr 'x 'add (list (Var 'a1) (Var 'a2)))
-              (Branch 'eq? (Var 'cond) (Int 1) 'then 'else)))
-          'then
-          (SsaBlock '()
-            (list
-              (SsaInstr 'x2 'add (list (Var 'x) (Var 'a1)))
-              (Jmp 'end)))
-          'else
-          (SsaBlock '()
-            (list
-              (SsaInstr 'x3 'add (list (Var 'x) (Var 'a2)))
-              (Jmp 'end)))
-          'end
-          (SsaBlock '()
-            (list
-              (Phi 'x4 `((then . ,(Var 'x2)) (else . ,(Var 'x3))))
-              (SsaInstr 'vec 'allocate (list (Int 8)))
-              (Store (Var 'x4) (Var 'vec) 0)
-              (SsaInstr 'v 'load (list (Var 'vec) (Int 0)))
-              (Return (Var 'v))))))
-      (Def 'random '() 'Integer '()
-        (hash
-          'start
-          (SsaBlock '()
-            (list
-              (Return (Int 0)))))))))
 
 (define interp-SSA-class
   (class object%
@@ -91,7 +22,7 @@
     
     (define/public (interp-program prog)
       (match prog
-        [(SsaProgram info defs)
+        [(ProgramDefs info defs)
          (for ([def (in-list defs)])
            (dict-set! definitions (Def-name def) def))
          (call-function 'main '())]))
@@ -105,20 +36,22 @@
          (define lh label-history)
          (define old-blocks current-blocks)
          (set! current-blocks blocks)
-         (define res (interp-blocks env blocks))
+         (define res (interp-blocks env name blocks))
          (set! label-history lh)
          (set! current-blocks old-blocks)
          res]))
          
     (define current-blocks (hash))
 
-    (define (interp-blocks env blocks)
+    (define (interp-blocks env name blocks)
       (set! current-blocks blocks)
-      (define instrs (SsaBlock-instr* (dict-ref blocks 'start)))
-      (set-current-block 'start)
+      (define instrs (SsaBlock-instr* (dict-ref blocks (symbol-append name 'start))))
+      (set-current-block (symbol-append name 'start))
       (interp-instrs env instrs))
          
     (define (interp-instrs env instrs)
+      (when (pair? instrs)
+        (copious "interp-SSA" (car instrs)))
       (match instrs
         [(cons (Phi x sources) rest)
          #:when (pair? (car sources))
@@ -153,7 +86,7 @@
         [(cons (SsaInstr x 'allocate (list (Int size))) rest)
          (define val (allocate-memory! size))
          (interp-instrs (dict-set env x val) rest)] 
-        [(cons (Store v base offset) rest)
+        [(cons (Store v base (Int offset)) rest)
          (define val (interp-exp env v))
          (define addr (+ (interp-exp env base) offset))
          (write-memory! addr val)
@@ -174,28 +107,32 @@
          (define b-val (interp-exp env b))
          (define res (interp-cmp op a-val b-val))
          (interp-instrs (dict-set env x res) rest)]
-        [(cons (Return v) rest)
+        [(cons (Return v) '())
          (interp-exp env v)]
-        [(cons (Jmp label) rest)
+        [(cons (Jmp label) '())
          (define instrs (SsaBlock-instr* (dict-ref current-blocks label)))
          (set-current-block label)
          (interp-instrs env instrs)]
-        [(cons (Branch op a b then else) rest)
+        [(cons (Branch op a b then else) '())
          (define a-val (interp-exp env a))
          (define b-val (interp-exp env b))
          (define target (if (zero? (interp-cmp op a-val b-val)) else then))
          (define instrs (SsaBlock-instr* (dict-ref current-blocks target)))
          (set-current-block target)
          (interp-instrs env instrs)]
-        [(cons (TailCall f args) rest)
+        [(cons (TailCall f args) '())
          (define name (interp-exp env f))
          (define arg-vals (for/list ([a args]) (interp-exp env a)))
          (call-function name arg-vals)]))
 
     (define (interp-exp env exp)
-      (match exp
-        [(Var x) (dict-ref env x)]
-        [(Int n) n]))
+      (copious "interp-SSA" exp)
+      (define result
+        (match exp
+          [(Var x) (dict-ref env x)]
+          [(Int n) n]))
+      (copious "interp-SSA" result)
+      result)
 
     (define binary-ops
       (hash
@@ -204,8 +141,8 @@
         'mul *
         'and bitwise-and
         'or bitwise-ior
-        'sal arithmetic-shift
-        'sar (lambda (x n) (arithmetic-shift x (- n)))
+        'sal (lambda (n x) (arithmetic-shift x n))
+        'sar (lambda (n x) (arithmetic-shift x (- n)))
         'xor bitwise-xor))
 
     (define unary-ops
@@ -237,11 +174,13 @@
     (define memory-objects (make-hash))
          
     (define (allocate-memory! size)
+      (copious "allocate-memory!" size)
       (define ptr (+ max-memory-addr 100))
       (set! max-memory-addr (+ ptr size))
       (define num-elem (/ size 8))
       (define v (make-vector num-elem #f))
       (dict-set! memory-objects ptr (list size v))
+      (copious "allocate-memory!" ptr)
       ptr)
 
     (define (read-memory ptr)
@@ -265,4 +204,73 @@
       (assert "memory write invalid" written)
       val)))
 
-(send (new interp-SSA-class) interp-program example-program)
+(define (interp-SSA prog)
+  (send (new interp-SSA-class) interp-program prog))
+
+;; function main()
+;; .start
+;; a1 = id 1
+;; a2 = id 2
+;; cond = call random()
+;; x = add a1 a2
+;; br (eq? cond 1) .then .else
+;; 
+;; .then
+;; x2 = add x a1
+;; jmp .end
+;; 
+;; .else
+;; x3 = add x a2
+;; jmp .end
+;; 
+;; .end
+;; x4 = phi .then x2 .else x3
+;; vec = allocate 8
+;; store x4 vec 0
+;; v = load vec 0
+;; return v
+
+;; function random()
+;; .start
+;; return 0
+
+(define example-program
+  (ProgramDefs '()
+    (list
+      (Def 'main '() 'Integer '()
+        (hash
+          'mainstart
+          (SsaBlock '()
+            (list
+              (SsaInstr 'a1 'id (list (Int 1)))
+              (SsaInstr 'a2 'id (list (Int 2)))
+              (SsaInstr 'cond 'call (list 'random))
+              (SsaInstr 'x 'add (list (Var 'a1) (Var 'a2)))
+              (Branch 'eq? (Var 'cond) (Int 1) 'then 'else)))
+          'then
+          (SsaBlock '()
+            (list
+              (SsaInstr 'x2 'add (list (Var 'x) (Var 'a1)))
+              (Jmp 'end)))
+          'else
+          (SsaBlock '()
+            (list
+              (SsaInstr 'x3 'add (list (Var 'x) (Var 'a2)))
+              (Jmp 'end)))
+          'end
+          (SsaBlock '()
+            (list
+              (Phi 'x4 `((then . ,(Var 'x2)) (else . ,(Var 'x3))))
+              (SsaInstr 'vec 'allocate (list (Int 8)))
+              (Store (Var 'x4) (Var 'vec) (Int 0))
+              (SsaInstr 'v 'load (list (Var 'vec) (Int 0)))
+              (Return (Var 'v))))))
+      (Def 'random '() 'Integer '()
+        (hash
+          'randomstart
+          (SsaBlock '()
+            (list
+              (Return (Int 0)))))))))
+
+(module* main #f
+  (send (new interp-SSA-class) interp-program example-program))

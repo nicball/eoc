@@ -149,7 +149,12 @@ Changelog:
          (struct-out X86Function)
          
          (struct-out Exit)
-         
+         (struct-out SsaBlock)
+         (contract-out (struct SsaInstr ([var symbol?] [op symbol?] [arg* (listof ssa-arg/c)])))
+         (contract-out (struct Phi ([var symbol?] [source* (listof (cons/c symbol? Var?))])))
+         (contract-out (struct Branch ([cc (one-of/c 'eq? '< '<= '> '>=)] [arg1 ssa-arg/c] [arg2 ssa-arg/c] [then symbol?] [else symbol?])))
+         (contract-out (struct Store ([val ssa-arg/c] [base ssa-arg/c] [offset Int?])))
+        
          )
 
 (struct Exit () #:transparent #:property prop:custom-print-quotable 'never
@@ -166,6 +171,130 @@ Changelog:
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]
                ))))])
+
+(struct SsaBlock [info instr*]
+  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'SsaBlock)
+                 (lambda (obj) (list (SsaBlock-info obj) (SsaBlock-instr* obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(SsaBlock info instr*)
+                     (print-info info port mode)
+                     (for ([instr instr*])
+                       (recur instr port))]))]
+                     
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]))))])
+                 
+(struct SsaInstr [var op arg*]
+  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'SsaInstr)
+                 (lambda (obj) (list (SsaInstr-var obj) (SsaInstr-op obj) (SsaInstr-arg* obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(SsaInstr var op arg*)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string (symbol->string var) port)
+                       (write-string " = " port)
+                       (write-string (symbol->string op) port)
+                       (let ([i 0])
+                         (for ([arg arg*])
+                           (cond [(not (eq? i 0))
+                                  (write-string "," port)])
+                           (write-string " " port)
+                           (recur arg port)
+                           (set! i (add1 i))))
+                             
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]))))])
+                 
+(struct Phi [var source*]
+  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'Phi)
+                 (lambda (obj) (list (Phi-var obj) (Phi-source* obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(Phi var source*)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "phi" port)
+                       (define fst #t)
+                       (for ([src source*])
+                         (if fst
+                           (set! fst #f)
+                           (write-string "," port))
+                         (write-string " ") port
+                         (write-string (symbol->string (car src)) port)
+                         (write-string " " port)
+                         (recur (cdr src) port))
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]))))])
+                 
+(struct Branch [cc arg1 arg2 then else]
+  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'Branch)
+                 (lambda (obj) (list (Branch-cc obj) (Branch-arg1 obj) (Branch-arg2 obj) (Branch-then obj) (Branch-else obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(Branch cc a b then else)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "branch (" port)
+                       (write-string (symbol->string cc) port)
+                       (write-string " " port)
+                       (recur a port)
+                       (write-string " " port)
+                       (recur b port)
+                       (write-string ") " port)
+                       (write-string (symbol->string then) port)
+                       (write-string " " port)
+                       (write-string (symbol->string else) port)
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]))))])
+
+(struct Store [val base offset]
+  #:transparent #:property prop:custom-print-quotable 'never
+  #:methods gen:custom-write
+  [(define write-proc
+     (let ([csp (make-constructor-style-printer
+                 (lambda (obj) 'Store)
+                 (lambda (obj) (list (Store-val obj) (Store-base obj) (Store-offset obj))))])
+       (lambda (ast port mode)
+         (cond [(eq? (AST-output-syntax) 'concrete-syntax)
+                (let ([recur (make-recur port mode)])
+                  (match ast
+                    [(Store val base offset)
+                     (let-values ([(line col pos) (port-next-location port)])
+                       (write-string "store " port)
+                       (recur val port)
+                       (write-string ", " port)
+                       (recur base port)
+                       (write-string ", " port)
+                       (recur offset port)
+                       (newline-and-indent port col))]))]
+               [(eq? (AST-output-syntax) 'abstract-syntax)
+                (csp ast port mode)]))))])
 
 ;; debug state is a nonnegative integer.
 ;; The easiest way to increment it is passing the -d option
@@ -2446,7 +2575,7 @@ Changelog:
   (cond [(assq r (reg-colors)) => (lambda (p) (cdr p))]
         [else -1])) ;; for registers not used in register allocator.
   
-;;  (cdr (assq r reg-colors)))
+;;  (cdr (assq r reg-colors))
 
 (define (num-registers-for-alloc)
   (vector-length registers-for-alloc))
@@ -2534,3 +2663,4 @@ Changelog:
     [else (error "in any-tag, unrecognized type" ty)]
     ))
 
+(define ssa-arg/c (or/c Var? Int? symbol?))
