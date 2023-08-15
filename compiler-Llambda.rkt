@@ -22,15 +22,6 @@
 
     (define/public (concat lsts) (apply append lsts))
    
-    (define/public (unzip lst)
-      (foldr
-        (lambda (p acc)
-          (cons
-            (cons (car p) (car acc))
-            (cons (cdr p) (cdr acc))))
-        (cons '() '())
-        lst))
-
     (define/public (set-filter p s) (list->set (filter p (set->list s))))
 
     (define/public (append-point sym) (symbol-append sym (string->symbol ".")))
@@ -75,6 +66,26 @@
         [(Lambda _ _ body) (list body)]
         [(HasType e _) (list e)]
         [(Closure _ es) es]))
+      
+    (define/public (analyse-dataflow cfg transfer bottom join)
+      (define label->value (make-hash))
+      (define work-list (make-queue))
+      (for ([v (in-vertices cfg)])
+        (dict-set! label->value v bottom)
+        (enqueue! work-list v))
+      (define cfg-t (transpose cfg))
+      (while (not (queue-empty? work-list))
+        (define curr-node (dequeue! work-list))
+        (define input
+          (join
+            (for/fold ([args'()]) ([pred (in-neighbors cfg-t curr-node)])
+              (cons (dict-ref label->value pred) args))))
+        (define output (transfer curr-node input))
+        (when (not (equal? output (dict-ref label->value curr-node)))
+          (dict-set! label->value curr-node output)
+          (for ([succ (in-vertices cfg)])
+            (enqueue! work-list succ))))
+      label->value)
 
     (define/public (shrink-exp-induct exp)
       (match exp
@@ -734,12 +745,76 @@
       (match p
         [(ProgramDefs info defs)
          (ProgramDefs info (map select-instructions-Def defs))]))
+         
+    (define/public (pass-build-dominance p)
+      (define/match (build-dominance-Def def)
+        [((Def name params 'Integer info blocks))
+         (define cfg (directed-graph '()))
+         (for ([(curr-label block) (in-dict blocks)])
+           (add-vertex! cfg curr-label)
+           (define (add! to)
+             (assert "jumping outside function" (dict-has-key? blocks to))
+             (add-vertex! cfg to)
+             (add-directed-edge! cfg curr-label to))
+           (for ([instr (SsaBlock-instr* block)])
+             (match instr
+               [(Jmp label)
+                (add! label)]
+               [(Branch _ _ _ then-label else-label)
+                (add! then-label)
+                (add! else-label)]
+               [_ #f])))
+         (define dominators
+           (let ([bottom (list->set (get-vertices cfg))]
+                 [join (lambda (args) (if (null? args) (set) (set-intersections args)))]
+                 [transfer (lambda (curr input) (set-add input curr))])
+             (analyse-dataflow cfg transfer bottom join)))
+         (define dominatees
+           (for*/fold ([dominatees (for/hash ([label (in-vertices cfg)]) (values label (set)))])
+                      ([(to domed-by) (in-dict dominators)]
+                       [from (in-set domed-by)])
+             (dict-update dominatees from (lambda (ds) (set-add ds to)))))
+         (define (strictly-dominates a b)
+           (and (not (equal? a b))
+                (set-member? (dict-ref dominatees a) b)))
+         (define immediate-dominatees ; a i< b iff a < b && !\exists c. a < c && c < b
+           (for*/fold ([immediate-dominatees (for/hash ([label (in-vertices cfg)]) (values label (set)))])
+                      ([(a bs) (in-dict dominatees)]
+                       [b (in-set bs)]
+                       #:when (and (not (equal? a b))
+                                   (empty? (filter (lambda (c) (and (not (equal? a c))
+                                                                    (strictly-dominates c b)))
+                                                   (set->list bs)))))
+             (dict-update immediate-dominatees a (lambda (ids) (set-add ids b)))))
+         (define dominance-frontiers ; a df b iff !(a < b) && \exists c. a <= c && c \in b.preds
+           (for*/fold ([dominance-frontiers (for/hash ([label (in-vertices cfg)]) (values label (set)))])
+                      ([(a cs) (in-dict dominatees)]
+                       [c (in-set cs)]
+                       [b (in-neighbors cfg c)]
+                       #:when (not (and (not (equal? a b)) (set-member? cs b))))
+             (dict-update dominance-frontiers a (lambda (df) (set-add df b)))))
+         ; (printf "cfg:\n~a\n"
+         ;   (graphviz cfg
+         ;     #:vertex-attributes
+         ;     (list
+         ;       (list 'xlabel
+         ;             (lambda (label) (format "~a" (dict-ref immediate-dominatees label)))))))
+         (Def name params 'Integer
+           (dict-set* info
+             'control-flow-graph cfg
+             'immediate-dominatees immediate-dominatees
+             'dominance-frontiers dominance-frontiers)
+           blocks)])
+  
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map build-dominance-Def defs))]))
 
     (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
          
     (define cmp->cc
       '((eq? . e) (< . l) (<= . le) (> . g) (>= . ge)))
-
+         
     (define/public (location? atom)
       (match atom
         [(or (Reg _) (Var _)) #t]
@@ -807,7 +882,7 @@
                 (dict-set! label->live-afters label (cdr sets))
                 (car sets)))
       
-            (define cfg
+            (define cfg-t
               (let ([gr (make-multigraph '())])
                 (for ([(curr-label block) (in-dict blocks)])
                   (add-vertex! gr curr-label)
@@ -820,26 +895,7 @@
                       [_ '()])))
                 gr))
       
-            (define (analyse-dataflow cfg transfer bottom join)
-              (define label->live-before (make-hash))
-              (define work-list (make-queue))
-              (for ([v (in-vertices cfg)])
-                (dict-set! label->live-before v bottom)
-                (enqueue! work-list v))
-              (define cfg-t (transpose cfg))
-              (while (not (queue-empty? work-list))
-                (define curr-node (dequeue! work-list))
-                (define input
-                  (for/fold ([state bottom]) ([pred (in-neighbors cfg-t curr-node)])
-                    (join state (dict-ref label->live-before pred))))
-                (define output (transfer curr-node input))
-                (when (not (equal? output (dict-ref label->live-before curr-node)))
-                  (dict-set! label->live-before curr-node output)
-                  (for ([succ (in-vertices cfg)])
-                    (enqueue! work-list succ))))
-              label->live-before)
-      
-            (analyse-dataflow cfg transfer (set) set-union) 
+            (analyse-dataflow cfg-t transfer (set) set-union*) 
             
             (Def name '() 'Integer info
               (hash-map/copy blocks
@@ -1218,7 +1274,8 @@
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Llambda-prime ,type-check-Llambda)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)))))
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-SSA)))))
         ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
         ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
         ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)

@@ -185,9 +185,8 @@
 
     (define (read-memory ptr)
       (define val #f)
-      (for ([(base alloc) (in-dict memory-objects)]
-            #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
-        #:final #t
+      (for/first ([(base alloc) (in-dict memory-objects)]
+                  #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
         (define index (/ (- ptr base) 8))
         (set! val (vector-ref (cadr alloc) index)))
       (assert "memory read invalid" val)

@@ -71,6 +71,7 @@ Changelog:
          make-lets dict-set-all dict-remove-all goto-label get-basic-blocks 
          symbol-append any-tag parse-program vector->set atm? fst
          print-x86 print-x86-class
+         set-intersections
          
          (contract-out [struct Prim ((op symbol?) (arg* exp-list?))])
          (contract-out [struct Var ((name symbol?))])
@@ -156,6 +157,8 @@ Changelog:
          (contract-out (struct Store ([val ssa-arg/c] [base ssa-arg/c] [offset Int?])))
         
          )
+         
+(define (set-intersections sets) (apply set-intersect (car sets) (cdr sets)))
 
 (struct Exit () #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
