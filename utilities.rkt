@@ -235,7 +235,8 @@ Changelog:
                   (match ast
                     [(Phi var source*)
                      (let-values ([(line col pos) (port-next-location port)])
-                       (write-string "phi" port)
+                       (write-string (symbol->string var) port)
+                       (write-string " = phi" port)
                        (define fst #t)
                        (for ([src source*])
                          (if fst

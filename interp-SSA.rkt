@@ -54,7 +54,7 @@
         (copious "interp-SSA" (car instrs)))
       (match instrs
         [(cons (Phi x sources) rest)
-         #:when (pair? (car sources))
+         #:when (not (empty? sources))
          (define from (get-last-block))
          (define val
            (for/fold ([val #f]) ([src sources] #:when (equal? (car src) from))

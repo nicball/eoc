@@ -809,6 +809,43 @@
       (match p
         [(ProgramDefs info defs)
          (ProgramDefs info (map build-dominance-Def defs))]))
+         
+    (define/public (pass-convert-to-SSA p)
+      (define/match (insert-phi-nodes-Def def)
+        [((Def name params 'Integer info blocks))
+         (define phi-nodes (make-hash))
+         (define variables (mutable-set))
+         (define blocks-defining-var (make-hash))
+         (for* ([(label block) (in-dict blocks)]
+                [instr (SsaBlock-instr* block)]
+                #:when (SsaInstr? instr))
+           (set-add! variables (SsaInstr-var instr))
+           (dict-update! blocks-defining-var (SsaInstr-var instr)(lambda (bs) (set-add bs label)) (set)))
+         (for ([var (in-set variables)])
+           (define work-list (set->list (dict-ref blocks-defining-var var)))
+           (define seen (mutable-set))
+           (while (not (empty? work-list))
+             (define curr-label (car work-list))
+             (set! work-list (cdr work-list))
+             (set-add! seen curr-label)
+             (for ([label (in-set (dict-ref (dict-ref info 'dominance-frontiers) curr-label))])
+               (dict-update! phi-nodes label (lambda (ps) (set-add ps var)) (set))
+               (when (not (set-member? seen label))
+                 (set! work-list (cons label work-list))))))
+         (Def name params 'Integer info
+           (for/hash ([(label block) (in-dict blocks)])
+             (values label
+               (SsaBlock (SsaBlock-info block)
+                 (append
+                   (for/list ([var (in-set (dict-ref phi-nodes label (set)))])
+                     (Phi var '()))
+                   (SsaBlock-instr* block))))))])
+      
+      (define convert-to-SSA-Def insert-phi-nodes-Def) ; for now
+  
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map convert-to-SSA-Def defs))]))
 
     (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
          
@@ -1224,7 +1261,7 @@
       `(
         (0 "var")
         (0 "cond")
-        (0 "while")
+        (1 "while")
         (0 "vectors")
         (0 "functions")
         (0 "lambda")))
@@ -1275,7 +1312,8 @@
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)
-        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-SSA)))))
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-SSA)
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-SSA)))))
         ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
         ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
         ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
