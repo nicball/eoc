@@ -90,13 +90,26 @@
         [(cons (SsaInstr x 'allocate (list (Int size))) rest)
          (define val (allocate-memory! size))
          (interp-instrs (dict-set env x val) rest)] 
-        [(cons (Store v base (Int offset)) rest)
+        [(cons (Store v base offset) rest)
          (define val (interp-exp env v))
          (define addr (+ (interp-exp env base) offset))
          (write-memory! addr val)
          (interp-instrs env rest)]
         [(cons (Collect _) rest)
          (interp-instrs env rest)]
+        [(cons (SsaInstr x 'call (list 'exit arg)) rest)
+         (error "exiting")]
+        [(cons (SsaInstr x 'call (list 'read_int)) rest)
+         (interp-instrs (dict-set env x (read)) rest)]
+        [(cons (SsaInstr x 'call (list 'proxy_vector_length v)) rest)
+         (define val (proxy-vector-length (interp-exp env v)))
+         (interp-instrs (dict-set env x val) rest)]
+        [(cons (SsaInstr x 'call (list 'proxy_vector_set v i e)) rest)
+         (define val (proxy-vector-set! (interp-exp env v) (interp-exp env i) (interp-exp env e)))
+         (interp-instrs (dict-set env x val) rest)]
+        [(cons (SsaInstr x 'call (list 'proxy_vector_ref v i)) rest)
+         (define val (proxy-vector-ref (interp-exp env v) (interp-exp env i)))
+         (interp-instrs (dict-set env x val) rest)]
         [(cons (SsaInstr x 'call (cons name args)) rest)
          (define arg-vals (for/list ([a args]) (interp-exp env a)))
          (define ret (call-function name arg-vals))
@@ -178,9 +191,11 @@
          
     (define memory-objects (make-hash))
          
+    (define (align x) (+ 8 (bitwise-and x -8)))
+         
     (define (allocate-memory! size)
       (copious "allocate-memory!" size)
-      (define ptr (+ max-memory-addr 100))
+      (define ptr (align (+ max-memory-addr 100)))
       (set! max-memory-addr (+ ptr size))
       (define num-elem (/ size 8))
       (define v (make-vector num-elem #f))
@@ -207,7 +222,44 @@
         (set! written #t))
       (when (not written)
         (error "memory write invalid"))
-      val)))
+      val)
+         
+    (define (raw-vector-length v)
+      (bitwise-and 63 (arithmetic-shift (read-memory v) -1)))
+         
+    (define (raw-vector-set! v i e)
+      (let ([addr (+ v (* 8 (+ i 1)))])
+         (write-memory! addr e)))
+         
+    (define (raw-vector-ref v i)
+      (read-memory (+ v (* 8 (+ i 1)))))
+         
+    (define (apply-closure clos args)
+      (let ([f (read-memory (+ clos 8))])
+         (call-function f (cons clos args))))
+
+    (define (proxy-vector? v)
+      (equal? 1 (bitwise-and 1 (arithmetic-shift (read-memory v) -63))))
+
+    (define (proxy-vector-length v)
+      (let ([wrapped (raw-vector-ref v 0)])
+        (if (proxy-vector? wrapped)
+          (proxy-vector-length wrapped)
+          (raw-vector-length wrapped))))
+
+    (define (proxy-vector-set! v i e)
+      (let ([wrapped (raw-vector-ref v 0)]
+            [e-cast (apply-closure (raw-vector-ref (raw-vector-ref v 2) i) (list e))])
+        (if (proxy-vector? wrapped)
+          (proxy-vector-set! wrapped i e-cast)
+          (raw-vector-set! wrapped i e-cast))))
+
+    (define (proxy-vector-ref v i)
+      (let* ([wrapped (raw-vector-ref v 0)]
+             [e (if (proxy-vector? wrapped)
+                  (proxy-vector-ref wrapped i)
+                  (raw-vector-ref wrapped i))])
+        (apply-closure (raw-vector-ref (raw-vector-ref v 1) i) (list e))))))
 
 (define (interp-SSA prog)
   (send (new interp-SSA-class) interp-program prog))
@@ -267,7 +319,7 @@
             (list
               (Phi 'x4 `((then . x2) (else . x3)))
               (SsaInstr 'vec 'allocate (list (Int 8)))
-              (Store (Var 'x4) (Var 'vec) (Int 0))
+              (Store (Var 'x4) (Var 'vec) 0)
               (SsaInstr 'v 'load (list (Var 'vec) (Int 0)))
               (Return (Var 'v))))))
       (Def 'random '() 'Integer '()

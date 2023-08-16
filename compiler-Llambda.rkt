@@ -679,7 +679,7 @@
            (SsaInstr x 'load (list (select-instructions-atom v) (Int (vector-offset n)))))]
         [(Assign (Var x) (Prim 'vector-set! (list v (Int n) e)))
          (list
-           (Store (select-instructions-atom e) (select-instructions-atom v) (Int (vector-offset n)))
+           (Store (select-instructions-atom e) (select-instructions-atom v) (vector-offset n))
            (SsaInstr x 'id (list (Int 0))))]
         [(Assign (Var x) (Prim 'vector-length (list v)))
          (list
@@ -689,11 +689,11 @@
         [(Assign (Var x) (Allocate n (list 'Vector elem-types ...)))
          (list
            (SsaInstr x 'allocate (list (Int (vector-offset n))))
-           (Store (Int (vector-tag elem-types)) (Var x) (Int 0)))]
+           (Store (Int (vector-tag elem-types)) (Var x) 0))]
         [(Assign (Var x) (AllocateClosure n type arity))
          (list
            (SsaInstr x 'allocate (list (Int (vector-offset n))))
-           (Store (Int (closure-tag type)) (Var x) (Int 0)))]
+           (Store (Int (closure-tag type)) (Var x) 0))]
         [(Assign (Var x) (Prim 'procedure-arity (list c)))
          (list
            (SsaInstr x 'load (list (select-instructions-atom c) (Int 0)))
@@ -704,7 +704,7 @@
            (Collect n))]
         [(Prim 'vector-set! (list v (Int n) e))
          (list
-           (Store (select-instructions-atom e) (select-instructions-atom v) (Int (vector-offset n))))]
+           (Store (select-instructions-atom e) (select-instructions-atom v) (vector-offset n)))]
         [(Assign (Var x) (Prim 'read '()))
          (list (SsaInstr x 'call (list 'read_int)))]
         [(Assign (Var x) (Prim '- (list a)))

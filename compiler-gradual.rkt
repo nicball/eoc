@@ -8,6 +8,7 @@
 (require "interp-Cany-proxy.rkt")
 (require "utilities.rkt")
 (require "interp.rkt")
+(require "interp-SSA.rkt")
 (provide (all-defined-out))
 
 (define compiler-gradual
@@ -19,6 +20,7 @@
       pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-allocate-registers pass-patch-instructions
       pass-prelude-and-conclusion
+      pass-build-dominance pass-convert-to-SSA
       explicate-assign select-instructions-atom)
     (super-new)
          
@@ -193,71 +195,62 @@
 
     (define/override (select-instructions-stmt s)
       (match s
-        [(Assign x (Prim 'inject-vector (list e)))
-         (list (Instr 'movq (list (select-instructions-atom e) x)))]
-        [(Assign x (Prim 'inject-proxy (list e)))
+        [(Assign (Var x) (Prim 'inject-vector (list e)))
          (list
-           (Instr 'movq (list (select-instructions-atom e) (Reg 'r11)))
-           (Instr 'movq (list (Imm (arithmetic-shift 1 63)) (Reg 'rax)))
-           (Instr 'orq (list (Reg 'rax) (Deref 'r11 0)))
-           (Instr 'movq (list (Reg 'r11) x)))]
-        [(Assign x (Prim 'proxy? (list e)))
+           (SsaInstr x 'id (list (select-instructions-atom e))))]
+        [(Assign (Var x) (Prim 'inject-proxy (list e)))
+         (define tag (gensym 'proxy.tag.))
          (list
-           (Instr 'movq (list (select-instructions-atom e) (Reg 'r11)))
-           (Instr 'movq (list (Deref 'r11 0) (Reg 'rax)))
-           (Instr 'sarq (list (Imm 63) (Reg 'rax)))
-           (Instr 'andq (list (Imm 1) (Reg 'rax)))
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim 'project-vector (list e)))
-         (list (Instr 'movq (list (select-instructions-atom e) x)))]
-        [(Assign x (Prim 'proxy-vector-set! (list v i e)))
+           (SsaInstr x 'id (list (select-instructions-atom e)))
+           (SsaInstr tag 'load (list (Var x) (Int 0)))
+           (SsaInstr tag 'or (list (Var tag) (Int (arithmetic-shift 1 63))))
+           (Store (Var tag) (Var x) 0))]
+        [(Assign (Var x) (Prim 'proxy? (list e)))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
-           (Instr 'movq (list (select-instructions-atom e) (Reg 'rdx)))
-           (Callq 'proxy_vector_set 3)
-           (Instr 'movq (list (Reg 'rax) x)))]
+           (SsaInstr x 'load (list (select-instructions-atom e) (Int 0)))
+           (SsaInstr x 'sar (list (Int 63) (Var x)))
+           (SsaInstr x 'and (list (Int 1) (Var x))))]
+        [(Assign (Var x) (Prim 'project-vector (list e)))
+         (list
+           (SsaInstr x 'id (list (select-instructions-atom e))))]
+        [(Assign (Var x) (Prim 'proxy-vector-set! (list v i e)))
+         (list
+           (SsaInstr x 'call (list 'proxy_vector_set
+                                   (select-instructions-atom v)
+                                   (select-instructions-atom i)
+                                   (select-instructions-atom e))))]
         [(Prim 'proxy-vector-set! (list v i e))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
-           (Instr 'movq (list (select-instructions-atom e) (Reg 'rdx)))
-           (Callq 'proxy_vector_set 3))]
-        [(Assign x (Prim 'proxy-vector-ref (list v i)))
+           (SsaInstr (gensym 'unused) 'call (list 'proxy_vector_set
+                                                  (select-instructions-atom v)
+                                                  (select-instructions-atom i)
+                                                  (select-instructions-atom e))))]
+        [(Assign (Var x) (Prim 'proxy-vector-ref (list v i)))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
-           (Callq 'proxy_vector_ref 2)
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim 'proxy-vector-length (list v)))
+           (SsaInstr x 'call (list 'proxy_vector_ref
+                                   (select-instructions-atom v)
+                                   (select-instructions-atom i))))]
+        [(Assign (Var x) (Prim 'proxy-vector-length (list v)))
          (list
-           (Instr 'movq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Callq 'proxy_vector_length 1)
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim 'any-vector-length (list v)))
+           (SsaInstr x 'call (list 'proxy_vector_length
+                                   (select-instructions-atom v))))]
+        [(Assign (Var x) (Prim 'any-vector-length (list v)))
          (list
-           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
-           (Instr 'andq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
-           (Callq 'proxy_vector_length 1)
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim 'any-vector-ref (list v i)))
+           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
+           (SsaInstr x 'load (list (Var x) (Int 0)))
+           (SsaInstr x 'call ('proxy_vector_length (Var x))))]
+        [(Assign (Var x) (Prim 'any-vector-ref (list v i)))
          (list
-           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
-           (Instr 'andq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
-           (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
-           (Callq 'proxy_vector_ref 2)
-           (Instr 'movq (list (Reg 'rax) x)))]
-        [(Assign x (Prim 'any-vector-set! (list v i e)))
+           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
+           (SsaInstr x 'load (list (Var x) (Int 0)))
+           (SsaInstr x 'call ('proxy_vector_ref (Var x) (select-instructions-atom i))))]
+        [(Assign (Var x) (Prim 'any-vector-set! (list v i e)))
          (list
-           (Instr 'movq (list (Imm -8) (Reg 'rdi)))
-           (Instr 'andq (list (select-instructions-atom v) (Reg 'rdi)))
-           (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
-           (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
-           (Instr 'movq (list (select-instructions-atom e) (Reg 'rdx)))
-           (Callq 'proxy_vector_set 2)
-           (Instr 'movq (list (Reg 'rax) x)))]
+           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
+           (SsaInstr x 'load (list (Var x) (Int 0)))
+           (SsaInstr x 'call ('proxy_vector_set (Var x)
+                                                (select-instructions-atom i)
+                                                (select-instructions-atom e))))]
         [s (super select-instructions-stmt s)]))
          
     (define/override (interp) interp-Lcast)
@@ -292,12 +285,14 @@
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lcast-prime ,type-check-Lany-proxy)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-5)
-        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-5)
-        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-5)
-        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-5)
-        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-5)
-        ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-SSA)
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-SSA)))))
+        ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-5)
+        ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-5)
+        ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-5)
+        ;("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-5)
+        ;("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)
     
 (module* main #f
-  (send (new compiler-gradual) run-tests #t))
+  (send (new compiler-gradual) run-tests #f))

@@ -75,7 +75,7 @@ Changelog:
          
          (contract-out [struct Prim ((op symbol?) (arg* exp-list?))])
          (contract-out [struct Var ((name symbol?))])
-         (contract-out [struct Int ((value fixnum?))])
+         (contract-out [struct Int ((value exact-integer?))])
          (contract-out [struct Let ((var symbolic?) (rhs exp?) (body exp?))])
          (struct-out Program)
          (struct-out ProgramDefsExp)
@@ -154,7 +154,7 @@ Changelog:
          (contract-out (struct SsaInstr ([var symbol?] [op symbol?] [arg* (listof ssa-arg/c)])))
          (contract-out (struct Phi ([var symbol?] [source* (listof (cons/c symbol? symbol?))])))
          (contract-out (struct Branch ([cc (one-of/c 'eq? '< '<= '> '>=)] [arg1 ssa-arg/c] [arg2 ssa-arg/c] [then symbol?] [else symbol?])))
-         (contract-out (struct Store ([val ssa-arg/c] [base ssa-arg/c] [offset Int?])))
+         (contract-out (struct Store ([val ssa-arg/c] [base ssa-arg/c] [offset exact-integer?])))
         
          )
          
@@ -295,7 +295,7 @@ Changelog:
                        (write-string ", " port)
                        (recur base port)
                        (write-string ", " port)
-                       (recur offset port)
+                       (write-string (number->string offset) port)
                        (newline-and-indent port col))]))]
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]))))])
