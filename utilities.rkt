@@ -152,7 +152,7 @@ Changelog:
          (struct-out Exit)
          (struct-out SsaBlock)
          (contract-out (struct SsaInstr ([var symbol?] [op symbol?] [arg* (listof ssa-arg/c)])))
-         (contract-out (struct Phi ([var symbol?] [source* (listof (cons/c symbol? Var?))])))
+         (contract-out (struct Phi ([var symbol?] [source* (listof (cons/c symbol? symbol?))])))
          (contract-out (struct Branch ([cc (one-of/c 'eq? '< '<= '> '>=)] [arg1 ssa-arg/c] [arg2 ssa-arg/c] [then symbol?] [else symbol?])))
          (contract-out (struct Store ([val ssa-arg/c] [base ssa-arg/c] [offset Int?])))
         
@@ -242,10 +242,10 @@ Changelog:
                          (if fst
                            (set! fst #f)
                            (write-string "," port))
-                         (write-string " ") port
+                         (write-string " " port)
                          (write-string (symbol->string (car src)) port)
                          (write-string " " port)
-                         (recur (cdr src) port))
+                         (write-string (symbol->string (cdr src)) port))
                        (newline-and-indent port col))]))]
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]))))])

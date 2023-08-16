@@ -820,7 +820,9 @@
                 [instr (SsaBlock-instr* block)]
                 #:when (SsaInstr? instr))
            (set-add! variables (SsaInstr-var instr))
-           (dict-update! blocks-defining-var (SsaInstr-var instr)(lambda (bs) (set-add bs label)) (set)))
+           (dict-update! blocks-defining-var (SsaInstr-var instr)
+             (lambda (bs) (set-add bs label))
+             (set)))
          (for ([var (in-set variables)])
            (define work-list (set->list (dict-ref blocks-defining-var var)))
            (define seen (mutable-set))
@@ -829,7 +831,10 @@
              (set! work-list (cdr work-list))
              (set-add! seen curr-label)
              (for ([label (in-set (dict-ref (dict-ref info 'dominance-frontiers) curr-label))])
-               (dict-update! phi-nodes label (lambda (ps) (set-add ps var)) (set))
+               (dict-update! phi-nodes label
+                 (lambda (ps)
+                   (set-add ps var))
+                 (set))
                (when (not (set-member? seen label))
                  (set! work-list (cons label work-list))))))
          (Def name params 'Integer info
@@ -837,11 +842,96 @@
              (values label
                (SsaBlock (SsaBlock-info block)
                  (append
+                   (if (equal? label (symbol-append name 'start))
+                     (for/list ([v variables] #:when (not (set-member? params v)))
+                       (SsaInstr v 'uninitialized '()))
+                     '())
                    (for/list ([var (in-set (dict-ref phi-nodes label (set)))])
                      (Phi var '()))
                    (SsaBlock-instr* block))))))])
       
-      (define convert-to-SSA-Def insert-phi-nodes-Def) ; for now
+      (define/match (rename-variables def)
+        [((Def name params 'Integer info blocks))
+         (define name-stack (make-hash))
+         (define fresh->orig (make-hash))
+         (define (get-latest-name var)
+           (car (dict-ref name-stack var (list var))))
+         (define (gen-fresh-name! var)
+           (define name #f)
+           (define (update stack)
+             (if (empty? stack)
+               (begin
+                 (set! name var) 
+                 (list name))
+               (let ([n (gensym (symbol-append var (string->symbol "#")))])
+                 (set! name n)
+                 (cons name stack))))
+           (dict-update! name-stack var update '())
+           (dict-set! fresh->orig name var)
+           name)
+         (define pending-phi-change (make-hash))
+         (define (change-phi! label var from-label from-var)
+           (dict-update! pending-phi-change label
+             (lambda (var->srcs)
+               (dict-update var->srcs var
+                 (lambda (srcs) (dict-set srcs from-label from-var))
+                 (hash)))
+             (hash)))
+                                           
+         (define new-blocks (hash))
+         
+         (define (rename-block label)
+           (define old (hash-copy name-stack))
+           (define rename-arg
+             (match-lambda
+               [(Var x) (Var (get-latest-name x))]
+               [arg arg]))
+           (define curr-block (dict-ref blocks label))
+           (define new-instrs
+             (for/list ([instr (SsaBlock-instr* curr-block)])
+               (match instr
+                 [(Phi var sources)
+                  (Phi (gen-fresh-name! var) sources)]
+                 [(SsaInstr var op args)
+                  (define new-args (map rename-arg args))
+                  (SsaInstr (gen-fresh-name! var) op new-args)]
+                 [(Store val base offset)
+                  (Store (rename-arg val) (rename-arg base) offset)]
+                 [(Branch op a b then-label else-label)
+                  (Branch op (rename-arg a) (rename-arg b) then-label else-label)]
+                 [(Return (Var x))
+                  (Return (Var (get-latest-name x)))]
+                 [(TailCall f args)
+                  (TailCall (rename-arg f) (map rename-arg args))]
+                 [_ instr])))
+           (set! new-blocks (dict-set new-blocks label (SsaBlock (SsaBlock-info curr-block) new-instrs)))
+           (for ([succ (in-neighbors (dict-ref info 'control-flow-graph) label)])
+             (for ([instr (SsaBlock-instr* (dict-ref blocks succ))])
+               (match instr
+                 [(Phi var sources)
+                  (change-phi! succ var label (get-latest-name var))]
+                 [_ #f])))
+           (for [(child (in-set (dict-ref (dict-ref info 'immediate-dominatees) label)))]
+             (rename-block child))
+           (set! name-stack old))
+         
+         (rename-block (symbol-append name 'start))
+         
+         (set! new-blocks
+           (for/hash ([(label block) (in-dict new-blocks)])
+             (values label
+               (SsaBlock (SsaBlock-info block)
+                 (filter (match-lambda [(and phi (Phi var (list _))) (printf "killed ~a\n" phi) #f] [_ #t])
+                   (for/list ([instr (SsaBlock-instr* block)])
+                     (match instr
+                       [(Phi var '())
+                        (Phi var (dict->list (dict-ref (dict-ref pending-phi-change label) (dict-ref fresh->orig var))))]
+                       [_ instr])))))))
+         
+         (Def name params 'Integer info new-blocks)])
+      
+      (define (convert-to-SSA-Def def)
+        (rename-variables (insert-phi-nodes-Def def)))
   
       (match p
         [(ProgramDefs info defs)
@@ -1261,7 +1351,7 @@
       `(
         (0 "var")
         (0 "cond")
-        (1 "while")
+        (0 "while")
         (0 "vectors")
         (0 "functions")
         (0 "lambda")))

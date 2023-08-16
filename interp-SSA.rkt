@@ -1,6 +1,6 @@
 #! /usr/bin/env -S nix shell nixpkgs#racket --command racket
 #lang racket
-;; op := add sub neg id call indirect_call mul and or sal sar xor cmp
+;; op := add sub neg id call indirect_call mul and or sal sar xor cmp uninitialized
 ;;       load_global func_addr load allocate
 ;;       store collect
 ;;       return jmp branch tailcall
@@ -12,6 +12,8 @@
   interp-SSA-class interp-SSA)
 
 (require "utilities.rkt")
+
+(struct Uninitialized [])
 
 (define interp-SSA-class
   (class object%
@@ -30,7 +32,8 @@
     (define (call-function name args)
       (match (dict-ref definitions name)
         [(Def name params 'Integer info blocks)
-         (assert "wrong number of arguments" (equal? (length args) (length params)))
+         (when (not (equal? (length args) (length params)))
+           (error "wrong number of arguments"))
          (define env
            (for/hash ([n params] [a args]) (values n a)))
          (define lh label-history)
@@ -54,14 +57,15 @@
         (copious "interp-SSA" (car instrs)))
       (match instrs
         [(cons (Phi x sources) rest)
-         #:when (not (empty? sources))
          (define from (get-last-block))
          (define val
-           (for/fold ([val #f]) ([src sources] #:when (equal? (car src) from))
-             (interp-exp env (cdr src))))
+           (for/first ([src sources] #:when (equal? (car src) from))
+             (interp-exp env (Var (cdr src)))))
+         (when (not val)
+           (error "didn't find source for phi"))
          (interp-instrs (dict-set env x val) rest)]
-        [(cons (Phi _ _) rest)
-         (interp-instrs env rest)]
+        [(cons (SsaInstr x 'uninitialized '()) rest)
+         (interp-instrs (dict-set env x (Uninitialized)) rest)]
         [(cons (SsaInstr x op (list a b)) rest)
          #:when (dict-has-key? binary-ops op)
          (define a-val (interp-exp env a))
@@ -166,7 +170,8 @@
       (when (> (length label-history) 2)
         (set! label-history (take label-history 2))))
     (define (get-last-block)
-      (assert "dangling phi node" (equal? (length label-history) 2))
+      (when (not (equal? (length label-history) 2))
+        (error "dangling phi node"))
       (second label-history))
 
     (define max-memory-addr 0)
@@ -184,23 +189,24 @@
       ptr)
 
     (define (read-memory ptr)
-      (define val #f)
-      (for/first ([(base alloc) (in-dict memory-objects)]
-                  #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
-        (define index (/ (- ptr base) 8))
-        (set! val (vector-ref (cadr alloc) index)))
-      (assert "memory read invalid" val)
+      (define val
+        (for/first ([(base alloc) (in-dict memory-objects)]
+                    #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
+          (define index (/ (- ptr base) 8))
+          (vector-ref (cadr alloc) index)))
+      (when (not val)
+        (error "memory read invalid"))
       val)
 
     (define (write-memory! ptr val)
       (define written #f)
-      (for ([(base alloc) (in-dict memory-objects)]
-            #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
-        #:final #t
+      (for/first ([(base alloc) (in-dict memory-objects)]
+                  #:when (and (<= base ptr) (< ptr (+ base (car alloc)))))
         (define index (/ (- ptr base) 8))
         (vector-set! (cadr alloc) index val)
         (set! written #t))
-      (assert "memory write invalid" written)
+      (when (not written)
+        (error "memory write invalid"))
       val)))
 
 (define (interp-SSA prog)
@@ -259,7 +265,7 @@
           'end
           (SsaBlock '()
             (list
-              (Phi 'x4 `((then . ,(Var 'x2)) (else . ,(Var 'x3))))
+              (Phi 'x4 `((then . x2) (else . x3)))
               (SsaInstr 'vec 'allocate (list (Int 8)))
               (Store (Var 'x4) (Var 'vec) (Int 0))
               (SsaInstr 'v 'load (list (Var 'vec) (Int 0)))
