@@ -9,7 +9,6 @@
 (require "type-check-Cany.rkt")
 (require "utilities.rkt")
 (require "interp.rkt")
-(require "interp-SSA.rkt")
 (require "compiler-Llambda.rkt")
 (provide (all-defined-out))
 
@@ -23,8 +22,7 @@
       pass-expose-allocation pass-uncover-get! pass-remove-complex-operands
       pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-patch-instructions pass-allocate-registers
-      pass-prelude-and-conclusion
-      pass-build-dominance pass-convert-to-SSA)
+      pass-prelude-and-conclusion)
     (super-new)
     
     (define/public (type-tag ty)
@@ -326,57 +324,67 @@
 
     (define/override (select-instructions-stmt s)
       (match s
-        [(Assign (Var x) (Prim 'make-any (list e (Int tag))))
+        [(Assign x (Prim 'make-any (list e (Int tag))))
          #:when (= 2 (bitwise-and tag 2))
          (list
-           (SsaInstr x 'or (list (select-instructions-atom e) (Int tag))))]
-        [(Assign (Var x) (Prim 'make-any (list e (Int tag))))
+           (Instr 'movq (list (select-instructions-atom e) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [(Assign x (Prim 'make-any (list e (Int tag))))
          #:when (= 0 (bitwise-and tag 2))
          (list
-           (SsaInstr x 'sal (list (Int 3) (select-instructions-atom e)))
-           (SsaInstr x 'or (list (Var x) (Int tag))))]
-        [(Assign (Var x) (Prim 'tag-of-any (list e)))
+           (Instr 'movq (list (select-instructions-atom e) x))
+           (Instr 'salq (list (Imm 3) x))
+           (Instr 'orq (list (Imm tag) x)))]
+        [(Assign x (Prim 'tag-of-any (list e)))
          (list
-           (SsaInstr x 'and (list (select-instructions-atom e) (Int 7))))]
-        [(Assign (Var x) (ValueOf e t))
+           (Instr 'movq (list (select-instructions-atom e) x))
+           (Instr 'andq (list (Imm 7) x)))]
+        [(Assign x (ValueOf e t))
          #:when (pair? t)
          (list
-           (SsaInstr x 'and (list (select-instructions-atom e) (Int -8))))]
-        [(Assign (Var x) (ValueOf e t))
+           (Instr 'movq (list (Imm -8) x))
+           (Instr 'andq (list (select-instructions-atom e) x)))]
+        [(Assign x (ValueOf e t))
          #:when (symbol? t)
          (list
-           (SsaInstr x 'sar (list (Int 3) (select-instructions-atom e))))]
-        [(Assign (Var x) (Prim 'any-vector-length (list v)))
+           (Instr 'movq (list (select-instructions-atom e) x))
+           (Instr 'sarq (list (Imm 3) x)))]
+        [(Assign x (Prim 'any-vector-length (list v)))
          (list
-           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
-           (SsaInstr x 'load (list (Var x) (Int 0)))
-           (SsaInstr x 'sar (list (Int 1) (Var x)))
-           (SsaInstr x 'and (list (Var x) (Int 63))))]
-        [(Assign (Var x) (Prim 'any-vector-ref (list v i)))
-         (define offset (gensym 'vector.offset.))
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (select-instructions-atom v) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 0) (Reg 'r11)))
+           (Instr 'sarq (list (Imm 1) (Reg 'r11)))
+           (Instr 'andq (list (Imm 63) (Reg 'r11)))
+           (Instr 'movq (list (Reg 'r11) x)))]
+        [(Assign x (Prim 'any-vector-ref (list v i)))
          (list
-           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
-           (SsaInstr offset 'add (list (select-instructions-atom i) (Int 1)))
-           (SsaInstr offset 'mul (list (Var offset) (Int 8)))
-           (SsaInstr x 'add (list (Var x) (Var offset)))
-           (SsaInstr x 'load (list (Var x) (Int 0))))]
-        [(Assign (Var x) (Prim 'any-vector-set! (list v i e)))
-         (define offset (gensym 'vector.offset.))
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (select-instructions-atom v) (Reg 'r11)))
+           (Instr 'movq (list (select-instructions-atom i) (Reg 'rax)))
+           (Instr 'addq (list (Imm 1) (Reg 'rax)))
+           (Instr 'imulq (list (Imm 8) (Reg 'rax)))
+           (Instr 'addq (list (Reg 'rax) (Reg 'r11)))
+           (Instr 'movq (list (Deref 'r11 0) x)))]
+        [(Assign x (Prim 'any-vector-set! (list v i e)))
          (list
-           (SsaInstr x 'and (list (select-instructions-atom v) (Int -8)))
-           (SsaInstr offset 'add (list (select-instructions-atom i) (Int 1)))
-           (SsaInstr offset 'mul (list (Var offset) (Int 8)))
-           (SsaInstr x 'add (list (Var x) (Var offset)))
-           (Store (select-instructions-atom e) (Var x) (Int 0))
-           (SsaInstr x 'id (list (Int (type-tag 'Void)))))]
+           (Instr 'movq (list (Imm -8) (Reg 'r11)))
+           (Instr 'andq (list (select-instructions-atom v) (Reg 'r11)))
+           (Instr 'movq (list (select-instructions-atom i) (Reg 'rax)))
+           (Instr 'addq (list (Imm 1) (Reg 'rax)))
+           (Instr 'imulq (list (Imm 8) (Reg 'rax)))
+           (Instr 'addq (list (Reg 'rax) (Reg 'r11)))
+           (Instr 'movq (list (select-instructions-atom e) (Reg 'r11)))
+           (Instr 'movq (list (Imm (type-tag 'Void)) x)))]
         [s (super select-instructions-stmt s)]))
 
-    (define/override (select-instructions-tail tail)
+    (define/override (select-instructions-tail name tail)
       (match tail
         [(Exit)
          (list
-           (SsaInstr (gensym 'unused.) 'call (list 'exit (Int 255))))]
-        [tail (super select-instructions-tail tail)]))
+           (Instr 'movq (list (Imm 255) (car (argument-passing-registers))))
+           (Callq 'exit 1))]
+        [tail (super select-instructions-tail name tail)]))
 
     (define/override (locations-written instr)
       (match instr
@@ -423,14 +431,12 @@
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lany-prime ,type-check-Lany)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany ,type-check-Cany)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany ,type-check-Cany)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-SSA)
-        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-SSA)
-        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-SSA)))))
-        ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
-        ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
-        ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
-        ;("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
-        ;("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
+        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
+        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
+        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
+        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
+        ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
     
 (module* main #f
-  (send (new compiler-Ldyn) run-tests #f))
+  (send (new compiler-Ldyn) run-tests #t))
