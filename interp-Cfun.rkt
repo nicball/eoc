@@ -12,7 +12,7 @@
 (define (interp-Cfun-mixin super-class)
   (class super-class
     (super-new)
-    (inherit initialize!)
+    (inherit initialize! lh-enter lh-leave)
 
     (define/override (interp-stmt env)
       (lambda (s)
@@ -22,10 +22,11 @@
            (define arg-vals (map (interp-exp env) es))
            (call-function f-val arg-vals s)
            env]
-          #;[(Assign (Var x) e)
+          #;
+          [(Assign (Var x) e)
            (dict-set env x (box ((interp-exp env) e)))]
-          [else ((super interp-stmt env) s)]
-          )))
+          [else ((super interp-stmt env) s)])))
+          
     
     (define/public (call-function fun arg-vals ast)
       (match fun
@@ -35,7 +36,10 @@
          (define params-args (for/list ([x xs] [arg arg-vals])
                                (cons x (box arg))))
          (define new-env (append params-args def-env))
-         ((interp-tail new-env blocks) (dict-ref blocks f-start))]
+         (lh-enter)
+         (define result ((interp-tail new-env blocks) (Goto f-start)))
+         (lh-leave)
+         result]
         [else (error 'interp-exp "expected C function, not ~a\nin ~v" fun ast)]))
     
     (define/override ((interp-exp env) ast)
@@ -61,8 +65,8 @@
       (match ast
         [(Def f `([,xs : ,ps] ...) rt info blocks)
          (cons f (box (CFunction xs `((name . ,f)) blocks '())))]
-        [else (error 'interp-def "unhandled" ast)]
-        ))
+        [else (error 'interp-def "unhandled" ast)]))
+        
 
     (define/override (interp-program ast)
       (match ast
@@ -75,10 +79,10 @@
                           [(CFunction xs info blocks '())
                            (CFunction xs info blocks top-level)])))
          ((interp-tail top-level '()) (TailCall (Var 'main) '()))]
-        [else (error 'interp-program "unhandled ~a" ast)]
-        ))
+        [else (error 'interp-program "unhandled ~a" ast)]))))
+        
     
-    ))
+    
 
 (define (interp-Cfun p)
   (define Cfun-class (interp-Cfun-mixin

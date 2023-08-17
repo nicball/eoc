@@ -256,7 +256,7 @@
            (Instr 'movq (list (Deref 'rdi 0) (Reg 'rdi)))
            (Instr 'movq (list (select-instructions-atom i) (Reg 'rsi)))
            (Instr 'movq (list (select-instructions-atom e) (Reg 'rdx)))
-           (Callq 'proxy_vector_set 2)
+           (Callq 'proxy_vector_set 3)
            (Instr 'movq (list (Reg 'rax) x)))]
         [s (super select-instructions-stmt s)]))
          

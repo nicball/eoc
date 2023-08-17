@@ -20,15 +20,6 @@
     (super-new)
 
     (define/public (concat lsts) (apply append lsts))
-   
-    (define/public (unzip lst)
-      (foldr
-        (lambda (p acc)
-          (cons
-            (cons (car p) (car acc))
-            (cons (cdr p) (cdr acc))))
-        (cons '() '())
-        lst))
 
     (define/public (set-filter p s) (list->set (filter p (set->list s))))
 
@@ -74,6 +65,26 @@
         [(Lambda _ _ body) (list body)]
         [(HasType e _) (list e)]
         [(Closure _ es) es]))
+
+    (define/public (analyse-dataflow cfg transfer bottom join)
+      (define label->value (make-hash))
+      (define work-list (make-queue))
+      (for ([v (in-vertices cfg)])
+        (dict-set! label->value v bottom)
+        (enqueue! work-list v))
+      (define cfg-t (transpose cfg))
+      (while (not (queue-empty? work-list))
+        (define curr-node (dequeue! work-list))
+        (define input
+          (join
+            (for/fold ([args'()]) ([pred (in-neighbors cfg-t curr-node)])
+              (cons (dict-ref label->value pred) args))))
+        (define output (transfer curr-node input))
+        (when (not (equal? output (dict-ref label->value curr-node)))
+          (dict-set! label->value curr-node output)
+          (for ([succ (in-vertices cfg)])
+            (enqueue! work-list succ))))
+      label->value)
 
     (define/public (shrink-exp-induct exp)
       (match exp
@@ -628,6 +639,208 @@
         [(ProgramDefs info defs)
          (ProgramDefs info (map optimize-blocks-Def defs))]))
 
+    (define/public (pass-build-dominance p)
+      (define/match (build-dominance-Def def)
+        [((Def name params rty info blocks))
+         (define cfg (directed-graph '()))
+         (for ([(curr-label block) (in-dict blocks)])
+           (add-vertex! cfg curr-label)
+           (define (add! to)
+             (when (not (dict-has-key? blocks to))
+               (error "jumping outside function"))
+             (add-vertex! cfg to)
+             (add-directed-edge! cfg curr-label to))
+           (let recur ([tail block])
+             (match tail
+               [(Goto label)
+                (add! label)]
+               [(IfStmt _ (Goto then-label) (Goto else-label))
+                (add! then-label)
+                (add! else-label)]
+               [(Seq _ tail)
+                (recur tail)]
+               [_ #f])))
+         (define dominators
+           (let ([bottom (list->set (get-vertices cfg))]
+                 [join (lambda (args) (if (null? args) (set) (apply set-intersect args)))]
+                 [transfer (lambda (curr input) (set-add input curr))])
+             (analyse-dataflow cfg transfer bottom join)))
+         (define (all-label->empty-set) (for/hash ([label (in-vertices cfg)]) (values label (set))))
+         (define dominatees
+           (for*/fold ([dominatees (all-label->empty-set)])
+                      ([(to domed-by) (in-dict dominators)]
+                       [from (in-set domed-by)])
+             (dict-update dominatees from (lambda (ds) (set-add ds to)))))
+         (define (strictly-dominates a b)
+           (and (not (equal? a b))
+                (set-member? (dict-ref dominatees a) b)))
+         (define immediate-dominatees ; a i< b iff a < b && !\exists c. a < c && c < b
+           (for*/fold ([immediate-dominatees (all-label->empty-set)])
+                      ([(a bs) (in-dict dominatees)]
+                       [b (in-set bs)]
+                       #:when (and (not (equal? a b))
+                                   (empty? (filter (lambda (c) (and (not (equal? a c))
+                                                                    (strictly-dominates c b)))
+                                                   (set->list bs)))))
+             (dict-update immediate-dominatees a (lambda (ids) (set-add ids b)))))
+         (define dominance-frontiers ; a df b iff !(a < b) && \exists c. a <= c && c \in b.preds
+           (for*/fold ([dominance-frontiers (all-label->empty-set)])
+                      ([(a cs) (in-dict dominatees)]
+                       [c (in-set cs)]
+                       [b (in-neighbors cfg c)]
+                       #:when (not (and (not (equal? a b)) (set-member? cs b))))
+             (dict-update dominance-frontiers a (lambda (df) (set-add df b)))))
+         ; (printf "cfg:\n~a\n"
+         ;   (graphviz cfg
+         ;     #:vertex-attributes
+         ;     (list
+         ;       (list 'xlabel
+         ;             (lambda (label) (format "~a" (dict-ref immediate-dominatees label)))))))
+         (Def name params rty
+           (dict-set* info
+             'control-flow-graph cfg
+             'immediate-dominatees immediate-dominatees
+             'dominance-frontiers dominance-frontiers)
+           blocks)])
+  
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map build-dominance-Def defs))]))
+         
+    (define/public (convert-to-SSA-rename-C! get-latest-name gen-fresh-name! prog)
+      (define (recur! p) (convert-to-SSA-rename-C! get-latest-name gen-fresh-name! p))
+      (match prog
+        [(or (Int _) (Bool _) (Void) (Allocate _ _) (GlobalValue _)
+             (FunRef _ _) (AllocateClosure _ _ _) (Collect _) (Goto _)
+             (Uninitialized) (Phi _))
+         prog]
+        [(Var x) (Var (get-latest-name x))]
+        [(Prim op args) (Prim op (map recur! args))]
+        [(Call f args) (Call (recur! f) (map recur! args))]
+        [(Assign (Var x) exp)
+         (define new-exp (recur! exp))
+         (Assign (Var (gen-fresh-name! x)) new-exp)]
+        [(Return exp)
+         (Return (recur! exp))]
+        [(Seq stmt tail)
+         (define new-stmt (recur! stmt))
+         (Seq new-stmt (recur! tail))]
+        [(IfStmt cmp g1 g2)
+         (IfStmt (recur! cmp) g1 g2)]
+        [(TailCall f args)
+         (TailCall (recur! f) (map recur! args))]))
+         
+    (define/public (pass-convert-to-SSA p)
+      (define/match (insert-phi-nodes-Def def)
+        [((Def name params rty info blocks))
+         (define phi-nodes (make-hash))
+         (define variables (mutable-set))
+         (define blocks-defining-var (make-hash))
+         (for ([(label block) (in-dict blocks)])
+           (let recur ([tail block])
+             (match tail
+               [(Seq (Assign (Var x) _) tail)
+                (set-add! variables x)
+                (dict-update! blocks-defining-var x
+                  (lambda (bs) (set-add bs label))
+                  (set))
+                (recur tail)]
+               [(Seq _ tail)
+                (recur tail)]
+               [_ #f])))
+         (for ([var (in-set variables)])
+           (define work-list (set->list (dict-ref blocks-defining-var var)))
+           (define seen (mutable-set))
+           (while (not (empty? work-list))
+             (define curr-label (car work-list))
+             (set! work-list (cdr work-list))
+             (set-add! seen curr-label)
+             (for ([label (in-set (dict-ref (dict-ref info 'dominance-frontiers) curr-label))])
+               (dict-update! phi-nodes label
+                 (lambda (ps)
+                   (set-add ps var))
+                 (set))
+               (when (not (set-member? seen label))
+                 (set! work-list (cons label work-list))))))
+         (Def name params rty info
+           (for/hash ([(label block) (in-dict blocks)])
+             (define new-block
+               (for/fold ([tail block]) ([v (in-set (dict-ref phi-nodes label (set)))])
+                 (Seq (Assign (Var v) (Phi '())) tail)))
+             (when (equal? label (symbol-append name 'start))
+               (set! new-block
+                 (for/fold ([tail new-block]) ([v variables] #:when (not (dict-has-key? params v))) 
+                   (Seq (Assign (Var v) (Uninitialized)) tail))))
+             (values label new-block)))])
+      
+      (define/match (rename-variables def)
+        [((Def name params rty info blocks))
+         (define name-stack (make-hash))
+         (define fresh->orig (make-hash))
+         (define (get-latest-name var)
+           (car (dict-ref name-stack var (list var))))
+         (define (gen-fresh-name! var)
+           (define name #f)
+           (define (update stack)
+             (if (empty? stack)
+               (begin
+                 (set! name var) 
+                 (list name))
+               (let ([n (gensym (symbol-append var (string->symbol "#")))])
+                 (set! name n)
+                 (cons name stack))))
+           (dict-update! name-stack var update '())
+           (dict-set! fresh->orig name var)
+           name)
+         (define pending-phi-change (make-hash))
+         (define (change-phi! label var from-label from-var)
+           (dict-update! pending-phi-change label
+             (lambda (var->srcs)
+               (dict-update var->srcs var
+                 (lambda (srcs) (dict-set srcs from-label from-var))
+                 (hash)))
+             (hash)))
+                                           
+         (define new-blocks (hash))
+         
+         (define (rename-block label)
+           (define old (hash-copy name-stack))
+           (define curr-block (dict-ref blocks label))
+           (set! new-blocks
+             (dict-set new-blocks label
+               (convert-to-SSA-rename-C! get-latest-name gen-fresh-name! curr-block)))
+           (for ([succ (in-neighbors (dict-ref info 'control-flow-graph) label)])
+             (let recur ([tail (dict-ref blocks succ)])
+               (match tail
+                 [(Seq (Assign (Var var) (Phi '())) tail)
+                  (change-phi! succ var label (get-latest-name var))
+                  (recur tail)]
+                 [_ #f])))
+           (for [(child (in-set (dict-ref (dict-ref info 'immediate-dominatees) label)))]
+             (rename-block child))
+           (set! name-stack old))
+         
+         (rename-block (symbol-append name 'start))
+         
+         (set! new-blocks
+           (for/hash ([(label block) (in-dict new-blocks)])
+             (values label
+               (let recur ([tail block])
+                 (match tail
+                   [(Seq (Assign (Var x) (Phi '())) tail)
+                    (define sources (dict->list (dict-ref (dict-ref pending-phi-change label) (dict-ref fresh->orig x))))
+                    (Seq (Assign (Var x) (Phi sources)) (recur tail))]
+                   [_ tail])))))
+         
+         (Def name params rty info new-blocks)])
+      
+      (define (convert-to-SSA-Def def)
+        (rename-variables (insert-phi-nodes-Def def)))
+  
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map convert-to-SSA-Def defs))]))
+
     (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
          
     (define cmp->cc
@@ -850,7 +1063,7 @@
                 (dict-set! label->live-afters label (cdr sets))
                 (car sets)))
       
-            (define cfg
+            (define cfg-t
               (let ([gr (make-multigraph '())])
                 (for ([(curr-label block) (in-dict blocks)])
                   (add-vertex! gr curr-label)
@@ -863,26 +1076,7 @@
                       [_ '()])))
                 gr))
       
-            (define (analyse-dataflow cfg transfer bottom join)
-              (define label->live-before (make-hash))
-              (define work-list (make-queue))
-              (for ([v (in-vertices cfg)])
-                (dict-set! label->live-before v bottom)
-                (enqueue! work-list v))
-              (define cfg-t (transpose cfg))
-              (while (not (queue-empty? work-list))
-                (define curr-node (dequeue! work-list))
-                (define input
-                  (for/fold ([state bottom]) ([pred (in-neighbors cfg-t curr-node)])
-                    (join state (dict-ref label->live-before pred))))
-                (define output (transfer curr-node input))
-                (when (not (equal? output (dict-ref label->live-before curr-node)))
-                  (dict-set! label->live-before curr-node output)
-                  (for ([succ (in-vertices cfg)])
-                    (enqueue! work-list succ))))
-              label->live-before)
-      
-            (analyse-dataflow cfg transfer (set) set-union) 
+            (analyse-dataflow cfg-t transfer (set) set-union*) 
             
             (Def name '() 'Integer info
               (hash-map/copy blocks
@@ -1261,12 +1455,14 @@
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Llambda-prime ,type-check-Llambda)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
-        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
-        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
-        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
-        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
-        ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-Clambda ,type-check-Clambda)
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Clambda ,type-check-Clambda)))))
+        ;("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
+        ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
+        ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
+        ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
+        ;("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
+        ;("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
 
 (module* main #f
-  (send (new compiler-Llambda) run-tests #t))
+  (send (new compiler-Llambda) run-tests #f))

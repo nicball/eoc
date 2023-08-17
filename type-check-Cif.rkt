@@ -32,16 +32,17 @@
     (define/public (free-vars-exp e)
       (define (recur e) (send this free-vars-exp e))
       (match e
+        [(or (Uninitialized) (Phi _)) (set)]
         [(Var x) (set x)]
         [(Int n) (set)]
         [(Bool b) (set)]
         [(Let x e body)
-	 (set-union (recur e) (set-remove (recur body) x))]
+         (set-union (recur e) (set-remove (recur body) x))]
         [(If cnd thn els)
          (set-union (recur cnd) (recur thn) (recur els))]
-	[(Prim op es)
-	 (apply set-union (cons (set) (map recur es)))]
-	[else (error 'free-vars-exp "unmatched ~a" e)]))
+        [(Prim op es)
+         (apply set-union (cons (set) (map recur es)))]
+        [else (error 'free-vars-exp "unmatched ~a" e)]))
     
     (field [type-changed #t])
 
@@ -70,12 +71,20 @@
       (match e
         [(Bool b) (values (Bool b) 'Boolean)]
         [else
-         ((super type-check-atm env) e)]
-        ))
+         ((super type-check-atm env) e)]))
+        
     
     (define/override ((type-check-exp env) e)
       (debug 'type-check-exp "Cif ~a" e)
       (match e
+        [(Uninitialized) (values e '_)]
+        [(Phi sources)
+         (values e
+           (or
+             (for/first ([src sources]
+                         #:when (dict-has-key? env (cdr src)))
+               (dict-ref env (cdr src)))
+             '_))]
         [(Bool b) (values (Bool b) 'Boolean)]
         [(Prim 'eq? (list e1 e2))
          (define-values (e1^ T1) ((type-check-exp env) e1))
@@ -83,8 +92,8 @@
          (check-type-equal? T1 T2 e)
          (values (Prim 'eq? (list e1^ e2^)) 'Boolean)]
         [else
-         ((super type-check-exp env) e)]
-        ))
+         ((super type-check-exp env) e)]))
+        
     
     (define/override (type-check-stmt env)
       (lambda (s)
@@ -96,8 +105,8 @@
            (update-type x t env)]
           [(Assign (Var x) e) (void)]
           [(Prim 'read '()) (void)]
-          [else (void)]
-          )))
+          [else (void)])))
+          
     
     (define/override ((type-check-tail env block-env blocks) t)
       (debug 'type-check-tail "Cif" t)
@@ -118,8 +127,8 @@
          (cond [(exp-ready? cnd env)
                 (define-values (c Tc) ((type-check-exp env) cnd))
                 (unless (type-equal? Tc 'Boolean)
-                  (error "type error: condition should be Boolean, not" Tc))
-                ])
+                  (error "type error: condition should be Boolean, not" Tc))])
+                
          (define T1 ((type-check-tail env block-env blocks) tail1))
          (define T2 ((type-check-tail env block-env blocks) tail2))
          (unless (type-equal? T1 T2)
@@ -154,8 +163,8 @@
                (set! type-changed #f)
                (for ([(label tail) (in-dict blocks)])
                  (define t ((type-check-tail env block-env blocks) tail))
-                 (update-type label t block-env)
-                 )
+                 (update-type label t block-env))
+                 
                (verbose "type-check-blocks" env block-env)
                (iterate)]
               [else (void)]))
@@ -180,7 +189,8 @@
          (CProgram new-info blocks)]
         [else (super type-check-program p)]))
     
-    #;(define/override (type-check-program p)
+    #;
+    (define/override (type-check-program p)
       (match p
         [(CProgram info blocks)
          ;; We override Cvar for this case to type check all the
@@ -201,9 +211,9 @@
                                 (cons x t)))
          (define new-info (dict-set info 'locals-types locals-types))
          (CProgram new-info blocks)]
-        [else (error 'type-check-program "expected a C program, not ~a" p)]))
+        [else (error 'type-check-program "expected a C program, not ~a" p)]))))
 
-    ))
+    
 
 (define type-check-Cif-class (type-check-Cif-mixin
                               (type-check-Cvar-mixin
