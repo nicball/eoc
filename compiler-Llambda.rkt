@@ -712,7 +712,7 @@
       (match prog
         [(or (Int _) (Bool _) (Void) (Allocate _ _) (GlobalValue _)
              (FunRef _ _) (AllocateClosure _ _ _) (Collect _) (Goto _)
-             (Uninitialized) (Phi _))
+             (Uninitialized _) (Phi _))
          prog]
         [(Var x) (Var (get-latest-name x))]
         [(Prim op args) (Prim op (map recur! args))]
@@ -770,7 +770,7 @@
              (when (equal? label (symbol-append name 'start))
                (set! new-block
                  (for/fold ([tail new-block]) ([v variables] #:when (not (dict-has-key? params v))) 
-                   (Seq (Assign (Var v) (Uninitialized)) tail))))
+                   (Seq (Assign (Var v) (Uninitialized (dict-ref (dict-ref info 'locals-types) v))) tail))))
              (values label new-block)))])
       
       (define/match (rename-variables def)
@@ -840,6 +840,87 @@
       (match p
         [(ProgramDefs info defs)
          (ProgramDefs info (map convert-to-SSA-Def defs))]))
+         
+    (define/public (pass-convert-from-SSA p)
+      (define/match (convert-from-SSA-Def def)
+        [((Def name params rty info blocks))
+         (define new-blocks (hash))
+         (define block-args (make-hash))
+         (for ([(label block) (in-dict blocks)])
+           (let recur ([tail block])
+             (match tail
+               [(Seq (Assign (Var x) (Phi sources)) tail)
+                (dict-update! block-args label
+                  (lambda (args)
+                    (dict-set args x sources))
+                  (hash))
+                (recur tail)]
+               [_ #f])))
+         ; (define uninit-vars (mutable-set))
+         ; (let recur ([tail (dict-ref blocks (symbol-append name 'start))])
+         ;   (match tail
+         ;     [(Seq (Assign (Var x) (Uninitialized _)) tail)
+         ;      (set-add! uninit-vars x)
+         ;      (recur tail)]
+         ;     [_ #f]))
+         (define (translate-goto! self target)
+           (define phi-block
+             (for/fold ([phi-block (Goto target)])
+                       ([(x sources) (in-dict (dict-ref block-args target (hash)))])
+                        ;#:when (not (set-member? uninit-vars (dict-ref sources self))))
+               (Seq (Assign (Var x) (Var (dict-ref sources self))) phi-block)))
+           (if (Goto? phi-block)
+             phi-block
+             (let ([phi-label (gensym 'phi.)])
+               (set! new-blocks (dict-set new-blocks phi-label phi-block))
+               (Goto phi-label))))
+         (define (remove-phis tail)
+           (match tail
+             [(Seq (Assign _ (Phi _)) tail)
+              (remove-phis tail)]
+             [_ tail]))
+         (for ([(label block) blocks])
+           (define new-block
+             (let recur ([tail (remove-phis block)])
+               (match tail
+                 [(Seq stmt tail)
+                  (Seq stmt (recur tail))]
+                 [(Goto target)
+                  (translate-goto! label target)]
+                 [(IfStmt c (Goto t) (Goto e))
+                  (IfStmt c (translate-goto! label t) (translate-goto! label e))]
+                 [_ tail])))
+           (set! new-blocks (dict-set new-blocks label new-block)))
+         (Def name params rty info new-blocks)])
+      
+      #;
+      (define/match (drawit p)
+        [((Def name params rty info blocks))
+         (define cfg (directed-graph '()))
+         (for ([(curr-label block) (in-dict blocks)])
+           (add-vertex! cfg curr-label)
+           (define (add! to)
+             (when (not (dict-has-key? blocks to))
+               (error "jumping outside function"))
+             (add-vertex! cfg to)
+             (add-directed-edge! cfg curr-label to))
+           (let recur ([tail block])
+             (match tail
+               [(Goto label)
+                (add! label)]
+               [(IfStmt _ (Goto then-label) (Goto else-label))
+                (add! then-label)
+                (add! else-label)]
+               [(Seq _ tail)
+                (recur tail)]
+               [_ #f])))
+         (printf "~a\n"
+           (graphviz cfg))
+         p])
+      
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map convert-from-SSA-Def defs))]))
 
     (define/public (argument-passing-registers) (map Reg '(rdi rsi rdx rcx r8 r9)))
          
@@ -874,6 +955,9 @@
            (arithmetic-shift arity 58))])
 
       (match s
+        [(Assign x (Uninitialized _))
+         (list
+           (Instr 'movq (list (Imm 0) x)))]
         [(Assign x (FunRef name _))
          (list
            (Instr 'leaq (list (Global name) x)))]
@@ -1274,7 +1358,7 @@
          #:when (not (Reg? b))
          (list
            (Instr 'leaq (list a (Reg 'rax)))
-           (Instr 'leaq (list (Reg 'rax) b)))]
+           (Instr 'movq (list (Reg 'rax) b)))]
         [(TailJmp a arity)
          #:when (not (equal? a (Reg 'rax)))
          (list
@@ -1283,10 +1367,10 @@
         [(Instr (or 'movq 'movzbq) (list a b))
          #:when (equal? a b)
          '()]
-        [(Instr op (list (Deref reg1 off1) (Deref reg2 off2)))
+        [(Instr op (list (and a (or (Deref _ _) (Global _))) (and b (Deref _ _))))
          (list
-           (Instr 'movq (list (Deref reg1 off1) (Reg 'rax)))
-           (Instr op (list (Reg 'rax) (Deref reg2 off2))))]
+           (Instr 'movq (list a (Reg 'rax)))
+           (Instr op (list (Reg 'rax) b)))]
         [(Instr 'cmpq (list a (Imm b)))
          (list
            (Instr 'movq (list (Imm b) (Reg 'rax)))
@@ -1456,13 +1540,14 @@
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
         ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
         ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-Clambda ,type-check-Clambda)
-        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Clambda ,type-check-Clambda)))))
-        ;("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
-        ;("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
-        ;("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
-        ;("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
-        ;("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
-        ;("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Clambda ,type-check-Clambda)
+        ("convert from SSA"         ,(lambda (x) (pass-convert-from-SSA x)) ,interp-Clambda ,type-check-Clambda)
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
+        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
+        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
+        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
+        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
+        ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
 
 (module* main #f
-  (send (new compiler-Llambda) run-tests #f))
+  (send (new compiler-Llambda) run-tests #t))

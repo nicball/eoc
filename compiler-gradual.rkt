@@ -19,6 +19,7 @@
       pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-allocate-registers pass-patch-instructions
       pass-prelude-and-conclusion
+      pass-build-dominance pass-convert-to-SSA pass-convert-from-SSA
       explicate-assign select-instructions-atom)
     (super-new)
          
@@ -291,7 +292,10 @@
         ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Lcast-prime ,type-check-Lany-proxy)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lcast-prime ,type-check-Lany-proxy)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
-        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
+        ;("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
+        ("convert from SSA"         ,(lambda (x) (pass-convert-from-SSA x)) ,interp-Cany-proxy ,type-check-Cany-proxy)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-5)
         ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-5)
         ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-5)

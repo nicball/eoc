@@ -22,7 +22,7 @@
 
     (define/override ((interp-exp env) exp)
       (match exp
-        [(Uninitialized) (Uninitialized)]
+        [(Uninitialized ty) (Uninitialized ty)]
         [(Phi sources)
          ((interp-exp env) (Var (dict-ref sources (lh-get-prev-label))))]
         [_ ((super interp-exp env) exp)]))

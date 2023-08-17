@@ -150,7 +150,7 @@ Added structs for AST nodes.
          
          (struct-out Exit)
          (contract-out (struct Phi ([source* (listof (cons/c symbol? symbol?))])))
-         (struct-out Uninitialized))
+         (contract-out (struct Uninitialized ([type type?]))))
          
          
 
@@ -193,17 +193,17 @@ Added structs for AST nodes.
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]))))])
 
-(struct Uninitialized () #:transparent #:property prop:custom-print-quotable 'never
+(struct Uninitialized (type) #:transparent #:property prop:custom-print-quotable 'never
   #:methods gen:custom-write
   [(define write-proc
      (let ([csp (make-constructor-style-printer
                  (lambda (obj) 'Uninitialized)
-                 (lambda (obj) (list)))])
+                 (lambda (obj) (list (Uninitialized-type obj))))])
        (lambda (ast port mode)
          (cond [(eq? (AST-output-syntax) 'concrete-syntax)
                 (match ast
-                  [(Uninitialized)
-                   (write-string "(uninitialized)" port)])]
+                  [(Uninitialized ty)
+                   (write-string (format "(uninitialized ~a)" ty) port)])]
                [(eq? (AST-output-syntax) 'abstract-syntax)
                 (csp ast port mode)]))))])
                
@@ -1605,7 +1605,7 @@ Added structs for AST nodes.
     [(Begin es body) #t]
     [(Value v) #t]
     [(Inst e ty ts) #t]
-    [(Uninitialized) #t]
+    [(Uninitialized _) #t]
     [(Phi sources) #t]
     [else #f]))
 
@@ -1668,6 +1668,7 @@ Added structs for AST nodes.
     [(IfStmt cnd els thn) #t]
     [(TailCall f arg*) #t]
     [(Prim 'exit '()) #t]
+    [(Exit) #t]
     [else #f]))
 
 (define (goto? s)

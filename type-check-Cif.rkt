@@ -32,7 +32,7 @@
     (define/public (free-vars-exp e)
       (define (recur e) (send this free-vars-exp e))
       (match e
-        [(or (Uninitialized) (Phi _)) (set)]
+        [(or (Uninitialized _) (Phi _)) (set)]
         [(Var x) (set x)]
         [(Int n) (set)]
         [(Bool b) (set)]
@@ -77,7 +77,7 @@
     (define/override ((type-check-exp env) e)
       (debug 'type-check-exp "Cif ~a" e)
       (match e
-        [(Uninitialized) (values e '_)]
+        [(Uninitialized ty) (values e ty)]
         [(Phi sources)
          (values e
            (or
