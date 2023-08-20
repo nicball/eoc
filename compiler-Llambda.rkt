@@ -18,7 +18,16 @@
 (define compiler-Llambda
   (class object%
     (super-new)
+         
+    (define name-counter 0)
+         
+    (define/public (base-name name)
+      (string->symbol (regexp-replace #px"\\.[[:digit:]]*$" (symbol->string name) "")))
 
+    (define/public (fresh-name name)
+      (set! name-counter (add1 name-counter))
+      (symbol-append (base-name name) (string->symbol (string-append "." (number->string name-counter)))))
+         
     (define/public (concat lsts) (apply append lsts))
 
     (define/public (set-filter p s) (list->set (filter p (set->list s))))
@@ -110,7 +119,7 @@
         [(Lambda params rty body)
          (define new-env
            (for/fold ([new-env env]) ([p params])
-             (dict-set new-env (car p) (gensym (append-point (car p))))))
+             (dict-set new-env (car p) (fresh-name (car p)))))
          (Lambda
            (for/list ([p params])
              (match p
@@ -126,7 +135,7 @@
         [(Var x)
          (Var (dict-ref env x))]
         [(Let x e body)
-         (let ([new-x (gensym (append-point x))])
+         (let ([new-x (fresh-name x)])
            (Let new-x ((uniquify-exp env) e) ((uniquify-exp (dict-set env x new-x)) body)))]
         [(Prim op es)
          (Prim op (for/list ([e es]) ((uniquify-exp env) e)))]
@@ -146,7 +155,7 @@
                [(Def name params rty info body)
                 (define new-env
                   (for/fold ([new-env env]) ([p params])
-                    (dict-set new-env (car p) (gensym (append-point (car p))))))
+                    (dict-set new-env (car p) (fresh-name (car p)))))
                 (Def
                   name
                   (for/list ([p params])
@@ -184,7 +193,7 @@
         [(Let x e body) (set-union (free-variables e) (set-subtract (free-variables body) (set x)))]
         [(Lambda params _ body) (set-subtract (free-variables body) (list->set (map car params)))]
         [(SetBang x e) (set-union (set x) (free-variables e))]
-        [_ (apply set-union (set) (map (lambda (x) (free-variables x)) (subexpressions exp)))]))
+        [_ (set-union* (map (lambda (x) (free-variables x)) (subexpressions exp)))]))
 
     (define/public (convert-assignments-induct captured)
       (match-lambda
@@ -201,7 +210,7 @@
          (define boxed-params
            (for/hash ([p params]
                       #:when (set-member? captured (car p)))
-             (values (car p) (gensym (append-point (car p))))))
+             (values (car p) (fresh-name (car p)))))
          (define new-params 
            (for/list ([p params])
              (match p
@@ -217,13 +226,13 @@
       
          (define/match (captured-by-lambda exp)
            [((Lambda params _ body)) (set-union (captured-by-lambda body) (set-subtract (free-variables body) (list->set (map car params))))]
-           [(_) (apply set-union (set) (map captured-by-lambda (subexpressions exp)))])
+           [(_) (set-union* (map captured-by-lambda (subexpressions exp)))])
         
          (define captured (captured-by-lambda body))
          (define boxed-params
            (for/hash ([p params]
                       #:when (set-member? captured (car p)))
-             (values (car p) (gensym (append-point (car p))))))
+             (values (car p) (fresh-name (car p)))))
       
          (define new-params 
            (for/list ([p params])
@@ -272,8 +281,8 @@
          (define (fv->type t)
            (convert-closure-type (dict-ref fv->type-dict t)))
          (define closure-type `(Vector _ ,@(for/list ([v fvs]) (fv->type v))))
-         (define closure-var (gensym 'closure.))
-         (define lambda-name (gensym 'lambda.))
+         (define closure-var (fresh-name 'closure))
+         (define lambda-name (fresh-name 'lambda))
       
          (define new-body
            (for/foldr ([new-body body]) ([fv fvs] [n (in-naturals)])
@@ -292,7 +301,7 @@
             [(Lambda params rty body) (lift-lambda (Lambda params rty body))]
             [(FunRef name arity) (Closure arity (list (FunRef name arity)))]
             [(Apply f args)
-             (define closure-var (gensym 'closure.))
+             (define closure-var (fresh-name 'closure))
              (Let closure-var f
                (Apply (Prim 'vector-ref (list (Var closure-var) (Int 0))) (cons (Var closure-var) args)))]
             [exp exp])))
@@ -304,7 +313,7 @@
              (for/list ([p params])
                (match p
                  [(list x ': t) (list x ': (convert-closure-type t))]))
-             (convert-params (gensym 'closure.) '(Vector _) params)))
+             (convert-params (fresh-name 'closure) '(Vector _) params)))
          (Def name new-params (convert-closure-type rty) info (convert-exp body))])
       
       (match p
@@ -326,7 +335,7 @@
          (when (> (length params) 6)
            (define rest-names (map car (drop params 5)))
            (define rest-types (map caddr (drop params 5)))
-           (define rest-var (gensym 'rest-params.))
+           (define rest-var (fresh-name 'rest-params))
            (set! params (append (take params 5) (list (list rest-var ': (cons 'Vector rest-types)))))
            (define rename-rest
              (induct-L
@@ -358,10 +367,10 @@
                                   (GlobalValue 'fromspace_end)))
                  (Void)
                  (Collect allocation-size)))
-             (define vector-var (gensym 'vector.))
+             (define vector-var (fresh-name 'vector))
              (define elems-vars
                (for/list ([i (in-range n)])
-                 (gensym (symbol-append 'vector.elem. (append-point (string->symbol (number->string i)))))))
+                 (fresh-name (symbol-append 'vector.elem. (string->symbol (number->string i))))))
           
              (eval-elems es elems-vars
                (Begin (list check-enough-space)
@@ -381,10 +390,10 @@
                                   (GlobalValue 'fromspace_end)))
                  (Void)
                  (Collect allocation-size)))
-             (define closure-var (gensym 'closure.))
+             (define closure-var (fresh-name 'closure))
              (define elems-vars
                (for/list ([i (in-range n)])
-                 (gensym (symbol-append 'closure.elem. (append-point (string->symbol (number->string i)))))))
+                 (fresh-name (symbol-append 'closure.elem. (string->symbol (number->string i))))))
           
              (eval-elems es elems-vars
                (Begin (list check-enough-space)
@@ -405,13 +414,13 @@
     (define/public (pass-uncover-get! p)
       (define/match (collect-set! exp)
         [((SetBang x e)) (set-union (set x) (collect-set! e))]
-        [(_) (apply set-union (set) (map collect-set! (subexpressions exp)))])
+        [(_) (set-union* (map collect-set! (subexpressions exp)))])
    
       (define uncover-get!-exp
         (induct-L
           (match-lambda
             [(Prim op args)
-             (let ([muts (apply set-union (set) (map collect-set! args))])
+             (let ([muts (set-union* (map collect-set! args))])
                (Prim op
                  (for/list ([arg args])
                    (match arg
@@ -431,19 +440,19 @@
    
     (define/public (complex-exp? e)
       (match e
-        [(Begin _ _) (gensym 'begin.)]
-        [(If _ _ _) (gensym 'if.)]
-        [(Let _ _ _) (gensym 'let.)]
-        [(WhileLoop _ _) (gensym 'while.)]
-        [(SetBang _ _) (gensym 'set!.)]
-        [(Prim op _) (gensym (symbol-append 'op. (append-point op)))]
-        [(Collect _) (gensym 'collect.)]
-        [(Allocate _ _) (gensym 'allocate.)]
-        [(GlobalValue x) (gensym (append-point x))]
-        [(FunRef _ _) (gensym 'fun-ref.)]
-        [(AllocateClosure _ _ _) (gensym 'allocate-closure.)]
-        [(Apply _ _) (gensym 'apply.)]
-        [(GetBang x) (gensym (append-point x))]
+        [(Begin _ _) (fresh-name 'begin)]
+        [(If _ _ _) (fresh-name 'if)]
+        [(Let _ _ _) (fresh-name 'let)]
+        [(WhileLoop _ _) (fresh-name 'while)]
+        [(SetBang _ _) (fresh-name 'set!)]
+        [(Prim op _) (fresh-name (symbol-append 'op. op))]
+        [(Collect _) (fresh-name 'collect)]
+        [(Allocate _ _) (fresh-name 'allocate)]
+        [(GlobalValue x) (fresh-name x)]
+        [(FunRef _ _) (fresh-name 'fun-ref)]
+        [(AllocateClosure _ _ _) (fresh-name 'allocate-closure)]
+        [(Apply _ _) (fresh-name 'apply)]
+        [(GetBang x) (fresh-name x)]
         [_ #f]))
          
     (define/public (remove-complex-operands-exp-induct exp)
@@ -493,17 +502,17 @@
     (define/public (emit-block hint block)
       (if (Goto? block)
         block
-        (emit-named-block (gensym hint) block)))
+        (emit-named-block (fresh-name hint) block)))
 
     (define/public (explicate-effects effs cont)
       (match effs
         ['() cont]
         [(cons (Apply f args) effs)
-         (define x (gensym 'not.used.))
+         (define x (fresh-name 'not.used))
          (explicate-assign x (Apply f args) (explicate-effects effs cont))]
         [(cons (WhileLoop c e) effs) 
-         (let ([loop-head-label (gensym 'loop.head.)]
-               [loop-body-label (gensym 'loop.body.)])
+         (let ([loop-head-label (fresh-name 'loop.head)]
+               [loop-body-label (fresh-name 'loop.body)])
            (emit-named-block loop-body-label (explicate-effects (list e) (Goto loop-head-label)))
            (emit-named-block loop-head-label (explicate-if c (Goto loop-body-label) (explicate-effects effs cont))))]
         [(cons (SetBang x e) effs)
@@ -519,7 +528,7 @@
         [(cons (or (Prim _ _) (Int _) (Var _) (Bool _) (Void) (GlobalValue _) (Allocate _ _) (FunRef _ _) (AllocateClosure _ _ _)) effs)
          (explicate-effects effs cont)]
         [(cons (If c t e) effs)
-         (let ([cont (emit-block 'effs. (explicate-effects effs cont))])
+         (let ([cont (emit-block 'effs (explicate-effects effs cont))])
            (explicate-if c (explicate-effects (list t) cont) (explicate-effects (list e) cont)))]
         [(cons (Let x e body) effs)
          (explicate-assign x e (explicate-effects (cons body effs) cont))]))
@@ -527,25 +536,25 @@
     (define/public (explicate-if c t e)
       (match c
         [(Apply f args)
-         (define cond-var (gensym 'if.cond.))
+         (define cond-var (fresh-name 'if.cond))
          (explicate-assign cond-var (Call f args) (explicate-if (Var cond-var) t e))]
         [(Begin effs c) (explicate-effects effs (explicate-if c t e))]
         [(Bool b)
          (if b t e)]
         [(or (Var _) (GlobalValue _))
          (IfStmt (Prim 'eq? (list c (Bool #t)))
-           (emit-block 'then. t)
-           (emit-block 'else. e))]
+           (emit-block 'then t)
+           (emit-block 'else e))]
         [(Prim 'not (list a))
          (IfStmt (Prim 'eq? (list a (Bool #f)))
-           (emit-block 'then. t)
-           (emit-block 'else. e))]
+           (emit-block 'then t)
+           (emit-block 'else e))]
         [(Prim op args)
          #:when (set-member? '(eq? < <= > >=) op)
-         (IfStmt c (emit-block 'then. t) (emit-block 'else. e))]
+         (IfStmt c (emit-block 'then t) (emit-block 'else e))]
         [(If c2 t2 e2)
-         (let ([goto-t (emit-block 'then. t)]
-               [goto-e (emit-block 'else. e)])
+         (let ([goto-t (emit-block 'then t)]
+               [goto-e (emit-block 'else e)])
            (explicate-if c2 (explicate-if t2 goto-t goto-e) (explicate-if e2 goto-t goto-e)))]
         [(Let x ee body)
          (explicate-assign x ee (explicate-if body t e))]
@@ -559,7 +568,7 @@
         [(GetBang _) (error 'explicate-assign "impossible")]
         [(Begin effs e) (explicate-effects effs (explicate-assign x e cont))]
         [(If c t e)
-         (let ([goto-cont (emit-block 'let.body. cont)])
+         (let ([goto-cont (emit-block 'let.body cont)])
            (explicate-if c (explicate-assign x t goto-cont) (explicate-assign x e goto-cont)))]
         [(Let x2 e2 body) (explicate-assign x2 e2 (explicate-assign x body cont))]
         [_ (Seq (Assign (Var x) e) cont)]))
@@ -590,7 +599,7 @@
         [(ProgramDefs info defs)
          (ProgramDefs info (map explicate-control-Def defs))]))
          
-    (define/public (pass-optimize-blocks p)
+    (define/public (pass-remove-dead-blocks p)
       (define/match (collect-jumps tail)
         [((Goto label))
          (set label)]
@@ -601,21 +610,6 @@
         [(_)
          (set)])
       
-      (define (remove-duplicate-blocks blocks)
-        (define uniq->label
-          (for/hash ([(label block) (in-dict blocks)])
-            (values block label)))
-        (define/match (rewrite-jumps tail)
-          [((Goto label))
-           (Goto (dict-ref uniq->label (dict-ref blocks label)))]
-          [((IfStmt c g1 g2))
-           (IfStmt c (rewrite-jumps g1) (rewrite-jumps g2))]
-          [((Seq s t))
-           (Seq s (rewrite-jumps t))]
-          [(s) s])
-        (for/hash ([(label tail) (in-dict blocks)])
-          (values label (rewrite-jumps tail))))
-        
       (define (remove-orphans defname blocks)
         (define cfg (make-multigraph '()))
         (for ([(label tail) (in-dict blocks)])
@@ -631,13 +625,13 @@
         (for/fold ([blocks blocks]) ([label (in-set orphans)])
           (dict-remove blocks label)))
         
-      (define/match (optimize-blocks-Def def)
+      (define/match (remove-dead-blocks-Def def)
         [((Def name params rty info blocks))
-         (Def name params rty info (remove-orphans name (remove-duplicate-blocks blocks)))])
+         (Def name params rty info (remove-orphans name blocks))])
          
       (match p
         [(ProgramDefs info defs)
-         (ProgramDefs info (map optimize-blocks-Def defs))]))
+         (ProgramDefs info (map remove-dead-blocks-Def defs))]))
 
     (define/public (pass-build-dominance p)
       (define/match (build-dominance-Def def)
@@ -780,16 +774,8 @@
          (define (get-latest-name var)
            (car (dict-ref name-stack var (list var))))
          (define (gen-fresh-name! var)
-           (define name #f)
-           (define (update stack)
-             (if (empty? stack)
-               (begin
-                 (set! name var) 
-                 (list name))
-               (let ([n (gensym (symbol-append var (string->symbol "#")))])
-                 (set! name n)
-                 (cons name stack))))
-           (dict-update! name-stack var update '())
+           (define name (fresh-name var))
+           (dict-update! name-stack var (lambda (st) (cons name st))'())
            (dict-set! fresh->orig name var)
            name)
          (define pending-phi-change (make-hash))
@@ -841,6 +827,78 @@
         [(ProgramDefs info defs)
          (ProgramDefs info (map convert-to-SSA-Def defs))]))
          
+    (define/public (pure-C-exp? exp)
+      (match exp
+        [(or (Var _) (Int _) (Uninitialized _) (GlobalValue _) (FunRef _ _) (Phi _)) #t]
+        [(Prim op _)
+         #:when (set-member? '(+ - eq? < <= > >= not procedure-arity vector-length vector-ref)
+                             op)
+         #t]
+        [_ #f]))
+         
+    (define/public (collect-C-exp-var-ref exp)
+      (match exp
+        [(Var x) (set x)] 
+        [(Prim op args) (set-union* (map (lambda (x) (collect-C-exp-var-ref x)) args))]
+        [(Phi sources)
+         (list->set (map cdr sources))]
+        [(Call f args)
+         (set-union* (cons (collect-C-exp-var-ref f) (map (lambda (x) (collect-C-exp-var-ref x)) args)))]
+        [_ (set)]))
+         
+    (define/public (pass-dead-code-elimination p)
+      (define/match (dead-code-elimination-Def def)
+        [((Def name params rty info blocks))
+         (define ref-count (make-hash))
+         (define (count-exp! exp [action add1])
+           (for ([x (in-set (collect-C-exp-var-ref exp))])
+             (dict-update! ref-count x action 0)))
+         (for ([(label block) (in-dict blocks)])
+           (let recur ([tail block])
+             (match tail
+               [(or (Seq (Assign _ exp) tail)
+                    (Seq exp tail))
+                (count-exp! exp)
+                (recur tail)]
+               [(or (Return exp)
+                    (IfStmt exp _ _))
+                (count-exp! exp)]
+               [(TailCall f args)
+                (count-exp! f)
+                (map count-exp! args)]
+               [_ tail])))
+         (define (remove-dead-code block)
+           (define change? #f)
+           (define (discount-exp! exp)
+             (count-exp! exp (lambda (x) (- x 1))))
+           (define new-block
+             (let recur ([tail block])
+               (match tail
+                 [(Seq (Assign (Var x) exp) tail)
+                  #:when (and (zero? (dict-ref ref-count x 0))
+                              (pure-C-exp? exp))
+                  (discount-exp! exp)
+                  (set! change? #t)
+                  (recur tail)]
+                 [(Seq exp-or-assign tail)
+                  (Seq exp-or-assign (recur tail))]
+                 [_ tail])))
+           (values change? new-block))
+         (define new-blocks blocks)
+         (define change? #t)
+         (while change?
+           (set! change? #f)
+           (set! new-blocks
+             (for/hash ([(label block) (in-dict new-blocks)])
+               (define-values (block-change? new-block) (remove-dead-code block))
+               (set! change? (or change? block-change?))
+               (values label new-block))))
+         (Def name params rty info new-blocks)])
+         
+      (match p
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map dead-code-elimination-Def defs))]))
+         
     (define/public (pass-convert-from-SSA p)
       (define/match (convert-from-SSA-Def def)
         [((Def name params rty info blocks))
@@ -871,7 +929,7 @@
                (Seq (Assign (Var x) (Var (dict-ref sources self))) phi-block)))
            (if (Goto? phi-block)
              phi-block
-             (let ([phi-label (gensym 'phi.)])
+             (let ([phi-label (fresh-name 'phi)])
                (set! new-blocks (dict-set new-blocks phi-label phi-block))
                (Goto phi-label))))
          (define (remove-phis tail)
@@ -1306,19 +1364,27 @@
                  (pqueue-decrease-key! queue hdl)))))
       
          (define locals-types (dict-ref info 'locals-types))
-         (define-values (variable->reg variable->stack variable->root)
-           (let-values ([(reg-variables stack-variables root-variables)
-                         (for/fold ([reg-variables '()] [stack-variables '()] [root-variables '()])
-                                   ([(location color) (in-dict location->color)])
-                           (if (>= color num-regs)
-                             (if (gc-type? (dict-ref locals-types (Var-name location)))
-                               (values reg-variables stack-variables (cons (cons location color) root-variables))
-                               (values reg-variables (cons (cons location color) stack-variables) root-variables))
-                             (values (cons (cons location color) reg-variables) stack-variables root-variables)))])
-             (values
-               (make-immutable-hash (for/list ([p reg-variables] #:when (Var? (car p))) (cons (car p) (dict-ref color->reg (cdr p)))))
-               (make-immutable-hash (for/list ([p stack-variables] [i (in-naturals)]) (cons (car p) (Deref 'rbp (* -8 (+ 1 i))))))
-               (make-immutable-hash (for/list ([p root-variables] [i (in-naturals)]) (cons (car p) (Deref 'r15 (* -8 (+ 1 i)))))))))
+         (define variable->reg (make-hash))
+         (define variable->stack (make-hash))
+         (define variable->root (make-hash))
+         (for ([(location color) (in-dict location->color)])
+           (if (>= color num-regs)
+             (if (gc-type? (dict-ref locals-types (Var-name location)))
+               (dict-set! variable->root location color)
+               (dict-set! variable->stack location color))
+             (dict-set! variable->reg location color)))
+         (set! variable->reg
+           (for/hash ([(location color) (in-dict variable->reg)]
+                      #:when (Var? location))
+             (values location (dict-ref color->reg color))))
+         (set! variable->stack
+           (for/hash ([location (in-dict-keys variable->stack)]
+                      [i (in-naturals)])
+             (values location (Deref 'rbp (* -8 (+ 1 i))))))
+         (set! variable->root
+           (for/hash ([location (in-dict-keys variable->root)]
+                      [i (in-naturals)])
+             (values location (Deref 'r15 (* -8 (+ 1 i))))))
             
          (define (transform-instr instr)
            (define/match (transform-arg arg)
@@ -1527,26 +1593,27 @@
       (define (annotate-var-type e)
         (parameterize ([typed-vars #t])
           (type-check-Llambda e)))
-      `(("shrink"                   ,(lambda (x) (pass-shrink x)) ,interp-Llambda ,type-check-Llambda)
-        ("uniquify"                 ,(lambda (x) (pass-uniquify x)) ,interp-Llambda ,type-check-Llambda)
-        ("reveal FunRef"            ,(lambda (x) (pass-reveal-functions x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("convert assignments"      ,(lambda (x) (pass-convert-assignments x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("annotate var types"       ,(lambda (x) x) ,interp-Llambda-prime ,annotate-var-type)
-        ("convert closures"         ,(lambda (x) (pass-convert-closures x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("limit funtion parameters" ,(lambda (x) (pass-limit-functions x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("expose allocation"        ,(lambda (x) (pass-expose-allocation x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Llambda-prime ,type-check-Llambda)
+      `(("shrink"                   ,(lambda (x) (pass-shrink x))                  ,interp-Llambda       ,type-check-Llambda)
+        ("uniquify"                 ,(lambda (x) (pass-uniquify x))                ,interp-Llambda       ,type-check-Llambda)
+        ("reveal FunRef"            ,(lambda (x) (pass-reveal-functions x))        ,interp-Llambda-prime ,type-check-Llambda)
+        ("convert assignments"      ,(lambda (x) (pass-convert-assignments x))     ,interp-Llambda-prime ,type-check-Llambda)
+        ("annotate var types"       ,(lambda (x) x)                                ,interp-Llambda-prime ,annotate-var-type)
+        ("convert closures"         ,(lambda (x) (pass-convert-closures x))        ,interp-Llambda-prime ,type-check-Llambda)
+        ("limit funtion parameters" ,(lambda (x) (pass-limit-functions x))         ,interp-Llambda-prime ,type-check-Llambda)
+        ("expose allocation"        ,(lambda (x) (pass-expose-allocation x))       ,interp-Llambda-prime ,type-check-Llambda)
+        ("uncover get!"             ,(lambda (x) (pass-uncover-get! x))            ,interp-Llambda-prime ,type-check-Llambda)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Llambda-prime ,type-check-Llambda)
-        ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Clambda ,type-check-Clambda)
-        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Clambda ,type-check-Clambda)
-        ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-Clambda ,type-check-Clambda)
-        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Clambda ,type-check-Clambda)
-        ("convert from SSA"         ,(lambda (x) (pass-convert-from-SSA x)) ,interp-Clambda ,type-check-Clambda)
-        ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
-        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
-        ("build interference graph" ,(lambda (x) (pass-build-interference x)) ,interp-x86-4)
-        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x)) ,interp-x86-4)
-        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x)) ,interp-x86-4)
+        ("explicate control"        ,(lambda (x) (pass-explicate-control x))       ,interp-Clambda       ,type-check-Clambda)
+        ("remove dead blocks"       ,(lambda (x) (pass-remove-dead-blocks x))      ,interp-Clambda       ,type-check-Clambda)
+        ("build dominance"          ,(lambda (x) (pass-build-dominance x))         ,interp-Clambda       ,type-check-Clambda)
+        ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x))          ,interp-Clambda       ,type-check-Clambda)
+        ("dead code elimination"    ,(lambda (x) (pass-dead-code-elimination x))   ,interp-Clambda       ,type-check-Clambda)
+        ("convert from SSA"         ,(lambda (x) (pass-convert-from-SSA x))        ,interp-Clambda       ,type-check-Clambda)
+        ("instruction selection"    ,(lambda (x) (pass-select-instructions x))     ,interp-x86-4)
+        ("liveness analysis"        ,(lambda (x) (pass-uncover-live x))            ,interp-x86-4)
+        ("build interference graph" ,(lambda (x) (pass-build-interference x))      ,interp-x86-4)
+        ("allocate registers"       ,(lambda (x) (pass-allocate-registers x))      ,interp-x86-4)
+        ("patch instructions"       ,(lambda (x) (pass-patch-instructions x))      ,interp-x86-4)
         ("prelude and conclusion"   ,(lambda (x) (pass-prelude-and-conclusion x)) #f)))))
 
 (module* main #f

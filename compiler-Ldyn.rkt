@@ -20,10 +20,10 @@
       set-filter
       pass-shrink pass-reveal-functions pass-convert-assignments pass-limit-functions
       pass-expose-allocation pass-uncover-get! pass-remove-complex-operands
-      pass-explicate-control pass-optimize-blocks pass-select-instructions pass-uncover-live
+      pass-explicate-control pass-remove-dead-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-patch-instructions pass-allocate-registers
       pass-prelude-and-conclusion
-      pass-build-dominance pass-convert-from-SSA pass-convert-to-SSA)
+      pass-build-dominance pass-convert-from-SSA pass-dead-code-elimination pass-convert-to-SSA)
     (super-new)
     
     (define/public (type-tag ty)
@@ -329,6 +329,17 @@
         [(ValueOf x ty) (ValueOf (recur! x) ty)]
         [(Exit) (Exit)]
         [_ (super convert-to-SSA-rename-C! get-latest-name gen-fresh-name! prog)]))
+         
+    (define/override (pure-C-exp? exp)
+      (match exp
+        [(Prim 'any-vector-ref _) #t]
+        [(ValueOf _ _) #t]
+        [_ (super pure-C-exp? exp)]))
+         
+    (define/override (collect-C-exp-var-ref exp)
+      (match exp
+        [(ValueOf x _) (collect-C-exp-var-ref x)]
+        [_ (super collect-C-exp-var-ref exp)]))
 
     (define/override (select-instructions-stmt s)
       (match s
@@ -438,9 +449,10 @@
         ("uncover get!"             ,(lambda (x) (pass-uncover-get! x)) ,interp-Lany-prime ,type-check-Lany)
         ("remove complex operands"  ,(lambda (x) (pass-remove-complex-operands x)) ,interp-Lany-prime ,type-check-Lany)
         ("explicate control"        ,(lambda (x) (pass-explicate-control x)) ,interp-Cany ,type-check-Cany)
-        ("optimize blocks"          ,(lambda (x) (pass-optimize-blocks x)) ,interp-Cany ,type-check-Cany)
+        ("remove dead blocks"       ,(lambda (x) (pass-remove-dead-blocks x)) ,interp-Cany ,type-check-Cany)
         ("build dominance"          ,(lambda (x) (pass-build-dominance x)) ,interp-Cany ,type-check-Cany)
         ("convert to SSA"           ,(lambda (x) (pass-convert-to-SSA x)) ,interp-Cany ,type-check-Cany)
+        ("dead code elimination"    ,(lambda (x) (pass-dead-code-elimination x)) ,interp-Cany ,type-check-Cany)
         ("convert from SSA"         ,(lambda (x) (pass-convert-from-SSA x)) ,interp-Cany ,type-check-Cany)
         ("instruction selection"    ,(lambda (x) (pass-select-instructions x)) ,interp-x86-4)
         ("liveness analysis"        ,(lambda (x) (pass-uncover-live x)) ,interp-x86-4)
