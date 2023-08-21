@@ -1558,7 +1558,8 @@
         (0 "while")
         (0 "vectors")
         (0 "functions")
-        (0 "lambda")))
+        (0 "lambda")
+        (0 "opt")))
          
     (define/public (run-tests x86?)
       (AST-output-syntax 'concrete-syntax)

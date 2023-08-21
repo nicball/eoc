@@ -109,7 +109,8 @@
         (0 "vectors")
         (0 "functions")
         (0 "lambda")
-        (0 "poly")))
+        (0 "poly")
+        (0 "opt")))
              
     (define/override (compiler-passes)
       (define (annotate-var-type e)

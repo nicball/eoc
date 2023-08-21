@@ -271,7 +271,8 @@
         (0 "vectors")
         (0 "functions")
         (0 "lambda")
-        (0 "gradual")))
+        (0 "gradual")
+        (0 "opt")))
              
     (define/override (compiler-passes)
       (define (annotate-var-type e)
