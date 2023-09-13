@@ -1,14 +1,14 @@
 #lang racket
 (require "heap.rkt")
 (provide make-pqueue pqueue-push! pqueue-pop! pqueue-decrease-key! pqueue-count
-	 set-node-key! node-key)
+         set-node-key! node-key)
 
 ;; priority queue (smallest priority first)
 
 (struct node ([key #:mutable] [index #:mutable #:auto])
-	#:methods gen:custom-write
-	[(define (write-proc node port mode)
-	   (fprintf port "(pq-node ~a)" (node-key node)))])
+        #:methods gen:custom-write
+        [(define (write-proc node port mode)
+         (fprintf port "(pq-node ~a)" (node-key node)))])
 
 (define (make-node<=? <=?)
   (lambda (x y)
