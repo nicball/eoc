@@ -1717,7 +1717,7 @@
         (0 "vectors")
         (0 "functions")
         (0 "lambda")
-        (0 "opt")))
+        (1 "opt")))
          
     (define/public (run-tests x86?)
       (AST-output-syntax 'concrete-syntax)
