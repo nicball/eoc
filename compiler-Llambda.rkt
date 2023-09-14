@@ -833,10 +833,14 @@
         [((Def name params rty info blocks))
          (define cfg (dict-ref info 'control-flow-graph))
          (define dominatees (dict-ref info 'dominatees))
+         
+         ; find back edges
          (define back-edges
            (for/set ([edge (in-edges cfg)]
                      #:when (set-member? (dict-ref dominatees (cadr edge)) (car edge)))
              edge))
+         
+         ; find natural loops
          (define (find-natural-loop back-edge)
            (define loop-blocks (mutable-set (car back-edge)))
            (define cfg-t (transpose cfg))
@@ -853,6 +857,7 @@
          (define natural-loops
            (for/hash ([back-edge back-edges])
              (values (cadr back-edge) (find-natural-loop back-edge))))
+         
          (define new-blocks (make-hash))
          (for ([(l t) (in-dict blocks)]) (dict-set! new-blocks l t))
          (define (collect-defs block)
@@ -872,6 +877,7 @@
              (set-union! loop-defs (collect-defs (dict-ref new-blocks label))))
            (define invariants '())
            (define progress? #t)
+           ; find invariants
            (while progress?
              (set! progress? #f)
              (for ([label (in-set labels)])
@@ -893,9 +899,11 @@
                      [(Seq s tail)
                       (Seq s (recur tail))]
                      [s s])))))
+           ; lift invariants
            (when (not (null? invariants))
              (define inv-block (gen-fresh-name! 'loop.invariant))
              (define inv-phis '())
+             ; split header's phi nodes
              (dict-set! new-blocks header
                (let recur ([tail (dict-ref new-blocks header)])
                  (match tail
@@ -907,6 +915,7 @@
                     (set! inv-phis (cons (Assign (Var outer-x) outer-phi) inv-phis))
                     (Seq (Assign (Var x) inner-phi) (recur tail))]
                    [t t])))
+             ; jump to preheader
              (for ([label (dict-keys new-blocks)])
                (dict-set! new-blocks label
                  (let recur ([tail (dict-ref new-blocks label)])
@@ -920,6 +929,7 @@
                      [(IfStmt c t e)
                       (IfStmt c (recur t) (recur e))]
                      [t t]))))
+             ; construct preheader
              (dict-set! new-blocks inv-block
                (for/fold ([block (Goto header)]) ([inv invariants])
                  (Seq (Assign (Var (car inv)) (cdr inv)) block)))
@@ -929,9 +939,51 @@
          (for ([(header labels) (in-dict natural-loops)])
            (licm-loop header labels))
          (Def name params rty info (for/hash ([(l t) (in-dict new-blocks)]) (values l t)))])
+      
       (match prog
         [(ProgramDefs info defs)
          (pass-build-dominance (ProgramDefs info (map licm-Def defs)))]))
+         
+    (define/public ((rename-C-exp renamer) exp)
+      (match exp
+        [(Var x) (Var (renamer x))]
+        [(Prim op args) (Prim op (map (rename-C-exp renamer) args))]
+        [(Call f args) (Call ((rename-C-exp renamer) f) (map (rename-C-exp renamer) args))]
+        [_ exp]))
+         
+    (define/public (pass-local-value-numbering prog)
+      (define/match (lvn-Def def)
+        [((Def name params rty info blocks))
+         (define (lvn-block block)
+           (define value->var (make-hash))
+           (define var->var (make-hash))
+           (define rename (rename-C-exp (lambda (x) (dict-ref var->var x x))))
+           (let recur ([tail block])
+             (match tail
+               [(Seq (Assign (Var x) exp) tail)
+                (define value (rename exp))
+                (if (not (pure-C-exp? exp))
+                  (Seq (Assign (Var x) value) (recur tail))
+                  (begin
+                    (if (dict-has-key? value->var value)
+                      (let ([canon (dict-ref value->var value)])
+                        (dict-set! var->var x canon)
+                        (Seq (Assign (Var x) (Var canon)) (recur tail)))
+                      (begin
+                        (dict-set! value->var value x)
+                        (Seq (Assign (Var x) value) (recur tail))))))]
+               [(Seq s tail)
+                (Seq (rename s) (recur tail))]
+               [(Return exp) (Return (rename exp))]
+               [(TailCall f args) (TailCall (rename f) (map rename args))]
+               [_ tail])))
+         (Def name params rty info
+           (for/hash ([(label block) (in-dict blocks)])
+             (values label (lvn-block block))))])
+      
+      (match prog
+        [(ProgramDefs info defs)
+         (ProgramDefs info (map lvn-Def defs))]))
          
     (define/public (pure-C-exp? exp)
       (match exp
@@ -1715,6 +1767,7 @@
         ("build dominance"            ,(lambda (x) (pass-build-dominance x))            ,interp-Clambda       ,type-check-Clambda)
         ("convert to SSA"             ,(lambda (x) (pass-convert-to-SSA x))             ,interp-Clambda       ,type-check-Clambda)
         ("loop invariant code motion" ,(lambda (x) (pass-loop-invariant-code-motion x)) ,interp-Clambda       ,type-check-Clambda)
+        ("local value numbering"      ,(lambda (x) (pass-local-value-numbering x))      ,interp-Clambda       ,type-check-Clambda)
         ("dead code elimination"      ,(lambda (x) (pass-dead-code-elimination x))      ,interp-Clambda       ,type-check-Clambda)
         ("convert from SSA"           ,(lambda (x) (pass-convert-from-SSA x))           ,interp-Clambda       ,type-check-Clambda)
         ("instruction selection"      ,(lambda (x) (pass-select-instructions x))        ,interp-x86-4)
