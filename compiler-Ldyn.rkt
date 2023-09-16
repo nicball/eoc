@@ -23,7 +23,7 @@
       pass-explicate-control pass-remove-dead-blocks pass-select-instructions pass-uncover-live
       pass-build-interference pass-patch-instructions pass-allocate-registers
       pass-prelude-and-conclusion
-      pass-build-dominance pass-convert-from-SSA pass-loop-invariant-code-motion pass-dead-code-elimination pass-convert-to-SSA)
+      pass-build-dominance pass-convert-from-SSA pass-loop-invariant-code-motion pass-local-value-numbering pass-dead-code-elimination pass-convert-to-SSA)
     (super-new)
     
     (define/public (type-tag ty)
@@ -323,12 +323,15 @@
         [(Exit) (Exit)]
         [e (super explicate-tail e)]))
          
-    (define/override (convert-to-SSA-rename-C! get-latest-name gen-fresh-name! prog)
-      (define (recur! p) (convert-to-SSA-rename-C! get-latest-name gen-fresh-name! p))
-      (match prog
-        [(ValueOf x ty) (ValueOf (recur! x) ty)]
+    (define/override ((rename-C-exp renamer) exp)
+      (match exp
+        [(ValueOf x t) (ValueOf ((rename-C-exp renamer) x) t)]
+        [_ ((super rename-C-exp renamer) exp)]))
+         
+    (define/override (convert-to-SSA-rename-C-block! rename! get-latest-name block)
+      (match block
         [(Exit) (Exit)]
-        [_ (super convert-to-SSA-rename-C! get-latest-name gen-fresh-name! prog)]))
+        [_ (super convert-to-SSA-rename-C-block! rename! get-latest-name block)]))
          
     (define/override (pure-C-exp? exp)
       (match exp
@@ -430,7 +433,7 @@
         (0 "vectors")
         (0 "functions")
         (0 "lambda")
-        (1 "dynamic")
+        (0 "dynamic")
         (0 "opt")))
   
     (define/override (compiler-passes)
@@ -454,6 +457,7 @@
         ("build dominance"            ,(lambda (x) (pass-build-dominance x))            ,interp-Cany       ,type-check-Cany)
         ("convert to SSA"             ,(lambda (x) (pass-convert-to-SSA x))             ,interp-Cany       ,type-check-Cany)
         ("loop invariant code motion" ,(lambda (x) (pass-loop-invariant-code-motion x)) ,interp-Cany       ,type-check-Cany)
+        ("local value numbering"      ,(lambda (x) (pass-local-value-numbering x))      ,interp-Cany       ,type-check-Cany)
         ("dead code elimination"      ,(lambda (x) (pass-dead-code-elimination x))      ,interp-Cany       ,type-check-Cany)
         ("convert from SSA"           ,(lambda (x) (pass-convert-from-SSA x))           ,interp-Cany       ,type-check-Cany)
         ("instruction selection"      ,(lambda (x) (pass-select-instructions x))        ,interp-x86-4)

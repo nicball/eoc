@@ -702,28 +702,30 @@
         [(ProgramDefs info defs)
          (ProgramDefs info (map build-dominance-Def defs))]))
          
-    (define/public (convert-to-SSA-rename-C! get-latest-name rename! prog)
-      (define (recur! p) (convert-to-SSA-rename-C! get-latest-name rename! p))
-      (match prog
-        [(or (Int _) (Bool _) (Void) (Allocate _ _) (GlobalValue _)
-             (FunRef _ _) (AllocateClosure _ _ _) (Collect _) (Goto _)
-             (Uninitialized _) (Phi _))
-         prog]
-        [(Var x) (Var (get-latest-name x))]
-        [(Prim op args) (Prim op (map recur! args))]
-        [(Call f args) (Call (recur! f) (map recur! args))]
-        [(Assign (Var x) exp)
-         (define new-exp (recur! exp))
-         (Assign (Var (rename! x)) new-exp)]
-        [(Return exp)
-         (Return (recur! exp))]
-        [(Seq stmt tail)
-         (define new-stmt (recur! stmt))
+    (define/public ((rename-C-exp renamer) exp)
+      (match exp
+        [(Var x) (Var (renamer x))]
+        [(Prim op args) (Prim op (map (rename-C-exp renamer) args))]
+        [(Call f args) (Call ((rename-C-exp renamer) f) (map (rename-C-exp renamer) args))]
+        [_ exp]))
+         
+    (define/public (convert-to-SSA-rename-C-block! rename! get-latest-name block)
+      (define (recur! tail) (convert-to-SSA-rename-C-block! rename! get-latest-name tail))
+      (match block
+        [(Seq (Assign (Var x) exp) tail)
+         (define new-exp ((rename-C-exp get-latest-name) exp))
+         (define new-stmt (Assign (Var (rename! x)) new-exp))
          (Seq new-stmt (recur! tail))]
+        [(Seq stmt tail)
+         (Seq ((rename-C-exp get-latest-name) stmt) (recur! tail))]
+        [(Goto label)
+         (Goto label)]
+        [(Return exp)
+         (Return ((rename-C-exp get-latest-name) exp))]
         [(IfStmt cmp g1 g2)
-         (IfStmt (recur! cmp) g1 g2)]
+         (IfStmt ((rename-C-exp get-latest-name) cmp) g1 g2)]
         [(TailCall f args)
-         (TailCall (recur! f) (map recur! args))]))
+         (TailCall ((rename-C-exp get-latest-name) f) (map (rename-C-exp get-latest-name) args))]))
          
     (define/public (pass-convert-to-SSA p)
       (define/match (insert-phi-nodes-Def def)
@@ -795,7 +797,7 @@
            (define curr-block (dict-ref blocks label))
            (set! new-blocks
              (dict-set new-blocks label
-               (convert-to-SSA-rename-C! get-latest-name rename! curr-block)))
+               (convert-to-SSA-rename-C-block! rename! get-latest-name curr-block)))
            (for ([succ (in-neighbors (dict-ref info 'control-flow-graph) label)])
              (let recur ([tail (dict-ref blocks succ)])
                (match tail
@@ -943,13 +945,6 @@
       (match prog
         [(ProgramDefs info defs)
          (pass-build-dominance (ProgramDefs info (map licm-Def defs)))]))
-         
-    (define/public ((rename-C-exp renamer) exp)
-      (match exp
-        [(Var x) (Var (renamer x))]
-        [(Prim op args) (Prim op (map (rename-C-exp renamer) args))]
-        [(Call f args) (Call ((rename-C-exp renamer) f) (map (rename-C-exp renamer) args))]
-        [_ exp]))
          
     (define/public (pass-local-value-numbering prog)
       (define/match (lvn-Def def)
@@ -1717,7 +1712,7 @@
         (0 "vectors")
         (0 "functions")
         (0 "lambda")
-        (1 "opt")))
+        (0 "opt")))
          
     (define/public (run-tests x86?)
       (AST-output-syntax 'concrete-syntax)
